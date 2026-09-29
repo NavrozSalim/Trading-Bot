@@ -1,0 +1,29 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      TRADING_MODE: DEMO
+      DRY_RUN: "true"
+      HEADLESS: "true"
+      ALLOW_LIVE_TRADING: ""
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./browser_profile:/app/browser_profile
+      - ./screenshots:/app/screenshots
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./config:/app/config
+    command: ["python", "main.py", "--dashboard"]
+
+  # Optional later: swap DATABASE_URL to this instance.
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: trading_bot
+  #     POSTGRES_USER: bot
+  #     POSTGRES_PASSWORD: bot
+  #   ports:
+  #     - "5432:5432"

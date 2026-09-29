@@ -1,0 +1,40 @@
+# Secrets and local environment
+.env
+.env.local
+*.pem
+*.key
+
+# Browser persistent profile (contains cookies / session)
+browser_profile/
+playwright/.auth/
+
+# User-discovered selectors (keep the example file)
+config/selectors.yaml
+
+# Runtime artifacts
+screenshots/
+logs/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

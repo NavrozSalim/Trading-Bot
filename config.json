@@ -1,0 +1,28 @@
+{
+  "roi": {
+    "x": 96,
+    "y": 208,
+    "width": 1741,
+    "height": 744
+  },
+  "hsv": {
+    "yellow": {
+      "h_min": 27,
+      "h_max": 39,
+      "s_min": 197,
+      "s_max": 255,
+      "v_min": 215,
+      "v_max": 255
+    },
+    "blue": {
+      "h_min": 106,
+      "h_max": 118,
+      "s_min": 174,
+      "s_max": 255,
+      "v_min": 215,
+      "v_max": 255
+    }
+  },
+  "min_confidence": 0.55,
+  "calibrated": true
+}

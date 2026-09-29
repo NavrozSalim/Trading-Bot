@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trading bot — demo control</title>
+  <style>
+    :root { font-family: ui-sans-serif, system-ui, sans-serif; background: #0f1419; color: #e7ecf3; }
+    body { margin: 0; padding: 24px; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .card { background: #1a222c; border: 1px solid #2a3544; border-radius: 10px; padding: 14px; }
+    .label { font-size: 0.75rem; color: #8b9bb4; text-transform: uppercase; letter-spacing: .04em; }
+    .value { margin-top: 6px; font-size: 1.05rem; word-break: break-word; }
+    .ok { color: #5dcca0; } .bad { color: #ff8b8b; }
+    .controls { margin: 20px 0; display: flex; flex-wrap: wrap; gap: 8px; }
+    button { background: #243044; color: #e7ecf3; border: 1px solid #3a4b63; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+    button.warn { background: #5a2a2a; border-color: #8a3d3d; }
+    .note { color: #8b9bb4; font-size: 0.9rem; max-width: 720px; }
+  </style>
+</head>
+<body>
+  <h1>Trading bot (DEMO)</h1>
+  <p class="note">Live mode cannot be turned on from this page. Phase 1–2 does not place orders.</p>
+  <div class="controls">
+    <button data-action="pause">PAUSE ENTRIES</button>
+    <button data-action="resume">RESUME</button>
+    <button data-action="stop">STOP BOT</button>
+    <button data-action="close-all">CLOSE ALL BOT POSITIONS</button>
+    <button class="warn" data-action="emergency">EMERGENCY STOP</button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <script>
+    const fields = [
+      ["bot_status", "Bot status"],
+      ["browser_status", "Browser status"],
+      ["logged_in", "Logged in"],
+      ["page_valid", "Page valid"],
+      ["current_symbol", "Current symbol"],
+      ["configured_symbol", "Configured symbol"],
+      ["current_price", "Current price"],
+      ["latest_signal", "Latest signal"],
+      ["trading_mode", "Trading mode"],
+      ["dry_run", "Dry run"],
+      ["kill_switch", "Kill switch"],
+      ["last_error", "Last error"],
+    ];
+    const grid = document.getElementById("grid");
+    function render(data) {
+      grid.innerHTML = "";
+      for (const [key, label] of fields) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const v = data[key];
+        const text = v === null || v === undefined || v === "" ? "—" : String(v);
+        card.innerHTML = `<div class="label">${label}</div><div class="value">${text}</div>`;
+        grid.appendChild(card);
+      }
+    }
+    async function refresh() {
+      const res = await fetch("/api/status");
+      render(await res.json());
+    }
+    document.querySelectorAll("button[data-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-action");
+        await fetch(`/api/control/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "dashboard" }),
+        });
+        refresh();
+      });
+    });
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
