@@ -159,7 +159,7 @@ class TradingBot:
         ctx.health.update(bot_status="running")
         mode = "DRY RUN" if settings.dry_run else settings.trading_mode.value
         print(f"\nBot running ({mode}). Strategy: yellow/blue sweep + 2-candle breakout.")
-        print("Orders go to MT5. Candle color is read from the on-screen TradingView chart.")
+        print("Orders go to MT5. The setup high, low, and close are read from the TradingView chart.")
         if not ctx.engine.color_reader.ready:
             print("Chart area is not calibrated, so no trade will be sent.")
             print("In Command Prompt run:  python calibrate.py")

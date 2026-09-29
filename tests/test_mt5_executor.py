@@ -30,6 +30,7 @@ class FakeMt5:
         self.trade_mode = trade_mode
         self.sent: list[dict[str, object]] = []
         self._positions: list[SimpleNamespace] = []
+        self.reject_sltp = False
 
     def initialize(self, **_kwargs: object) -> bool:
         return True
@@ -91,6 +92,8 @@ class FakeMt5:
 
     def order_send(self, request: dict[str, object]) -> SimpleNamespace:
         self.sent.append(dict(request))
+        if request["action"] == self.TRADE_ACTION_SLTP and self.reject_sltp:
+            return SimpleNamespace(retcode=10016, comment="invalid stops")
         if request["action"] == self.TRADE_ACTION_DEAL:
             buy = request["type"] == self.ORDER_TYPE_BUY
             self._positions = [
@@ -130,7 +133,7 @@ def _order() -> OrderRequest:
         stop_loss=4308.99,
         take_profit=None,
         signal_id="XAUUSD_1M_2026-09-23T12:04_BUY",
-        expected_price=4309.79,
+        expected_price=4309.80,
     )
 
 
@@ -235,6 +238,39 @@ def test_closed_candles_drop_forming_bar() -> None:
     candles = terminal.closed_candles("XAUUSD", "1M", 5)
     assert len(candles) == 4
     assert all(c.is_closed for c in candles)
+
+
+@pytest.mark.asyncio
+async def test_stops_follow_the_fill_and_a_rejected_stop_closes_the_sell(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = False
+    settings.mt5_symbol = "XAUUSD"
+    settings.mt5_magic = 26092301
+    api = FakeMt5()
+    api.reject_sltp = True
+    api.symbol_info_tick = lambda _symbol: SimpleNamespace(ask=4155.700, bid=4155.637)  # type: ignore[method-assign]
+    executor = Mt5Executor(settings, terminal=Mt5Terminal(api=api))
+    await executor.start()
+    result = await executor.open_short(
+        OrderRequest(
+            symbol="XAUUSD",
+            direction="SELL",
+            quantity=0.35,
+            stop_loss=4157.494,
+            take_profit=4156.118,
+            signal_id="XAUUSD_1M_2026-09-29T13:30_SELL",
+            expected_price=4156.406,
+        )
+    )
+    assert result.verified is False
+    assert "closed because the stop and target were not accepted" in result.message
+    assert api.sent[1]["action"] == FakeMt5.TRADE_ACTION_SLTP
+    assert api.sent[1]["sl"] == 4156.725
+    assert api.sent[1]["tp"] == 4155.349
+    assert float(api.sent[1]["sl"]) > 4155.637 > float(api.sent[1]["tp"])
+    assert api.sent[2]["action"] == FakeMt5.TRADE_ACTION_DEAL
+    assert api.sent[2]["type"] == FakeMt5.ORDER_TYPE_BUY
+    assert api.sent[2]["position"] == 1001
+    await executor.stop()
 
 
 def test_closed_candles_empty_when_only_forming() -> None:

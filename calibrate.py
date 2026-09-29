@@ -39,7 +39,8 @@ def _select(image: np.ndarray, title: str) -> tuple[int, int, int, int] | None:
 
 def main() -> int:
     print("Leave the TradingView chart still, with one yellow candle and one blue candle visible.")
-    print("1. Drag a box around the candle area only. Press Enter.")
+    print("Hide the floating price tag. Leave the price numbers on the right visible.")
+    print("1. Drag a box around the candles AND those price numbers. Press Enter.")
     print("2. Drag a box inside a yellow candle body. Press Enter.")
     print("3. Drag a box inside a blue candle body. Press Enter.")
     image, origin_x, origin_y = _capture_monitor()

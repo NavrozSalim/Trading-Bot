@@ -17,7 +17,7 @@ BUY
 - After that close, later candles may be any color. The buy stays until the touch
 - A red after the last yellow, up through the breakout, must touch the yellow. Body or wick is enough
 - A red that does not touch the yellow cancels the buy. Reds after the breakout are not checked
-- If price reaches that target before the retest, the yellow is finished and there is no buy
+- If price reaches the 1:1.8 target before the retest, the yellow is finished and there is no buy
 
 SELL is the mirror
 - Two green candles while price is rising, on the lower side of the blue
@@ -31,16 +31,18 @@ SELL is the mirror
 - After that close, later candles may be any color. The sell stays until the touch
 - A green after the last blue, up through the breakdown, must touch the blue. Body or wick is enough
 - A green that does not touch the blue cancels the sell. Greens after the breakdown are not checked
-- If price reaches that target before the retest, the blue is finished and there is no sell
+- If price reaches the 1:1.8 target before the retest, the blue is finished and there is no sell
 
 Stop is 0.80 beyond the extreme from the colored candle through the breakout or breakdown.
-Take profit is the same point distance used for the lot, added beyond the entry.
-While waiting, that entry is the yellow top or the blue bottom. The order uses the fill price.
-The breakout close is not the entry. Never touches Playwright or MT5.
+The 1:1.8 target is measured from the breakout or breakdown close.
+Risk is the yellow top minus the sweep low, or the sweep high minus the blue bottom.
+Target distance is that risk times 1.8. A breakout at 4501.5 with 500 points of risk targets 4510.5.
+The order is sent at the retest. The breakout close is not the entry. Never touches Playwright or MT5.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -80,15 +82,15 @@ def _ts(candle: CandleLike) -> Any:
     return getattr(candle, "timestamp", "1970-01-01T00:00")
 
 
-def target_from_entry(entry: float, extreme: float, *, buy: bool) -> float:
-    """Lot distance measured from the fill. The extra 0.80 on the stop is not included.
+REWARD_R = 1.8
 
-    Buy target = entry + (entry - sweep low).
-    Sell target = entry - (sweep high - entry).
-    """
+
+def reward_target(breakout_price: float, risk: float, *, buy: bool) -> float:
+    """1:1.8 target from the breakout close. Risk is the sweep distance, without the 0.80 stop."""
+    distance = risk * REWARD_R
     if buy:
-        return round(entry + (entry - extreme), 5)
-    return round(entry - (extreme - entry), 5)
+        return round(breakout_price + distance, 5)
+    return round(breakout_price - distance, 5)
 
 
 def is_yellow_sweep_bar(candle: CandleLike, previous: CandleLike) -> bool:
@@ -115,7 +117,7 @@ def body_outside_fraction(candle: CandleLike, edge: float, *, side: str) -> floa
     return min(1.0, outside / body)
 
 
-def _two_reds_on_the_upper_side(candles: Sequence[CandleLike], index: int) -> bool:
+def _two_reds_on_the_upper_side(candles: Sequence[CandleLike], index: int) -> list[CandleLike]:
     """Two reds in the attached fall into the yellow. A green may sit between them."""
     yellow = candles[index]
     reds: list[CandleLike] = []
@@ -128,11 +130,11 @@ def _two_reds_on_the_upper_side(candles: Sequence[CandleLike], index: int) -> bo
         if is_red(candle):
             reds.append(candle)
         if len(reds) >= 2 and any(red.high >= yellow.high for red in reds):
-            return True
-    return False
+            return list(reversed(reds))
+    return []
 
 
-def _two_greens_on_the_lower_side(candles: Sequence[CandleLike], index: int) -> bool:
+def _two_greens_on_the_lower_side(candles: Sequence[CandleLike], index: int) -> list[CandleLike]:
     """Two greens in the attached rise into the blue. A red may sit between them."""
     blue = candles[index]
     greens: list[CandleLike] = []
@@ -145,8 +147,23 @@ def _two_greens_on_the_lower_side(candles: Sequence[CandleLike], index: int) -> 
         if is_green(candle):
             greens.append(candle)
         if len(greens) >= 2 and any(green.low <= blue.low for green in greens):
-            return True
-    return False
+            return list(reversed(greens))
+    return []
+
+
+def _clock(candle: CandleLike) -> str:
+    stamp = getattr(candle, "timestamp", None)
+    if hasattr(stamp, "strftime"):
+        return str(stamp.strftime("%H:%M"))
+    match = re.search(r"(\d{2}:\d{2})", str(stamp or ""))
+    return match.group(1) if match else ""
+
+
+def _timed(label: str, *candles: CandleLike) -> str:
+    clocks = [clock for clock in (_clock(candle) for candle in candles) if clock]
+    if not clocks:
+        return label
+    return f"{label} {', '.join(clocks)}"
 
 
 def _latest_paint(colors: Sequence[str] | None, count: int) -> tuple[str, int] | None:
@@ -164,55 +181,59 @@ MAX_SWEEP_CLUSTER = 3
 
 
 def _buy_stage_log(
+    candles: Sequence[CandleLike],
     *,
-    reds_ready: bool,
+    yellow_at: int,
+    reds: Sequence[CandleLike],
     sweep_at: int | None,
     breakout_at: int | None,
-    gapped: bool,
-    missed: bool,
+    gap_at: int | None,
+    missed_at: int | None,
 ) -> str:
-    lines = ["YELLOW DETECTED — BUY SETUP"]
-    if reds_ready:
-        lines.append("2 RED CANDLES — REQUIREMENT COMPLETE")
+    lines = [_timed("YELLOW DETECTED — BUY SETUP", candles[yellow_at])]
+    if reds:
+        lines.append(_timed("2 RED CANDLES — REQUIREMENT COMPLETE", *reds))
     if sweep_at is not None and sweep_at == breakout_at:
-        lines.append("SWEEP + BREAKOUT COMPLETE")
+        lines.append(_timed("SWEEP + BREAKOUT COMPLETE", candles[sweep_at]))
     else:
         if sweep_at is not None:
-            lines.append("SWEEP COMPLETE")
+            lines.append(_timed("SWEEP COMPLETE", candles[sweep_at]))
         if breakout_at is not None:
-            lines.append("BREAKOUT COMPLETE")
-    if gapped:
-        lines.append("SETUP INVALID — RED DOES NOT TOUCH THE YELLOW")
-    elif missed:
-        lines.append("SETUP INVALID — TARGET REACHED WITHOUT A RETEST")
-    elif reds_ready and sweep_at is not None and breakout_at is not None:
+            lines.append(_timed("BREAKOUT COMPLETE", candles[breakout_at]))
+    if gap_at is not None:
+        lines.append(_timed("SETUP INVALID — RED DOES NOT TOUCH THE YELLOW", candles[gap_at]))
+    elif missed_at is not None:
+        lines.append(_timed("SETUP INVALID — 1:1.8 TARGET REACHED WITHOUT A RETEST", candles[missed_at]))
+    elif reds and sweep_at is not None and breakout_at is not None:
         lines.append("SETUP COMPLETE — WAITING FOR RETEST")
     return " | ".join(lines)
 
 
 def _sell_stage_log(
+    candles: Sequence[CandleLike],
     *,
-    greens_ready: bool,
+    blue_at: int,
+    greens: Sequence[CandleLike],
     sweep_at: int | None,
     breakdown_at: int | None,
-    gapped: bool,
-    missed: bool,
+    gap_at: int | None,
+    missed_at: int | None,
 ) -> str:
-    lines = ["BLUE DETECTED — SELL SETUP"]
-    if greens_ready:
-        lines.append("2 GREEN CANDLES — REQUIREMENT COMPLETE")
+    lines = [_timed("BLUE DETECTED — SELL SETUP", candles[blue_at])]
+    if greens:
+        lines.append(_timed("2 GREEN CANDLES — REQUIREMENT COMPLETE", *greens))
     if sweep_at is not None and sweep_at == breakdown_at:
-        lines.append("SWEEP + BREAKDOWN COMPLETE")
+        lines.append(_timed("SWEEP + BREAKDOWN COMPLETE", candles[sweep_at]))
     else:
         if sweep_at is not None:
-            lines.append("SWEEP COMPLETE")
+            lines.append(_timed("SWEEP COMPLETE", candles[sweep_at]))
         if breakdown_at is not None:
-            lines.append("BREAKDOWN COMPLETE")
-    if gapped:
-        lines.append("SETUP INVALID — GREEN DOES NOT TOUCH THE BLUE")
-    elif missed:
-        lines.append("SETUP INVALID — TARGET REACHED WITHOUT A RETEST")
-    elif greens_ready and sweep_at is not None and breakdown_at is not None:
+            lines.append(_timed("BREAKDOWN COMPLETE", candles[breakdown_at]))
+    if gap_at is not None:
+        lines.append(_timed("SETUP INVALID — GREEN DOES NOT TOUCH THE BLUE", candles[gap_at]))
+    elif missed_at is not None:
+        lines.append(_timed("SETUP INVALID — 1:1.8 TARGET REACHED WITHOUT A RETEST", candles[missed_at]))
+    elif greens and sweep_at is not None and breakdown_at is not None:
         lines.append("SETUP COMPLETE — WAITING FOR RETEST")
     return " | ".join(lines)
 
@@ -295,7 +316,7 @@ class SweepBreakoutStrategy:
             if only_index is None and y > len(candles) - 4:
                 continue
             yellow = candles[y]
-            reds_ready = _two_reds_on_the_upper_side(candles, y)
+            reds = _two_reds_on_the_upper_side(candles, y)
             sweep_at = next(
                 (i for i in range(y + 1, len(candles)) if candles[i].low < yellow.low),
                 None,
@@ -309,10 +330,15 @@ class SweepBreakoutStrategy:
                     breakout_at = i
                     break
             gap_end = breakout_at + 1 if breakout_at is not None else len(candles)
-            gapped = any(
-                is_red(c) and unattached_below(c, yellow) for c in candles[y + 1 : gap_end]
+            gap_at = next(
+                (
+                    i
+                    for i in range(y + 1, gap_end)
+                    if is_red(candles[i]) and unattached_below(candles[i], yellow)
+                ),
+                None,
             )
-            ready = reds_ready and sweep_at is not None and breakout_at is not None and not gapped
+            ready = bool(reds) and sweep_at is not None and breakout_at is not None and gap_at is None
             sl = 0.0
             extra: dict[str, str] = {
                 "pattern": "buy_yellow_sweep",
@@ -322,17 +348,19 @@ class SweepBreakoutStrategy:
                 "retest_level": str(yellow.high),
                 "anchor_time": str(_ts(yellow)),
                 "stage_log": _buy_stage_log(
-                    reds_ready=reds_ready,
+                    candles,
+                    yellow_at=y,
+                    reds=reds,
                     sweep_at=sweep_at,
                     breakout_at=breakout_at,
-                    gapped=gapped,
-                    missed=False,
+                    gap_at=gap_at,
+                    missed_at=None,
                 ),
             }
             if not ready:
                 if only_index is None:
                     continue
-                extra["setup_invalid"] = "1" if gapped else "0"
+                extra["setup_invalid"] = "1" if gap_at is not None else "0"
                 return sl, extra
             end = max(sweep_at, breakout_at)
             after = candles[y + 1 : end + 1]
@@ -342,22 +370,28 @@ class SweepBreakoutStrategy:
                     continue
                 return sl, extra
             sl = round(min(after_low, yellow.low) - self.sl_offset, 5)
-            tp = target_from_entry(yellow.high, after_low, buy=True)
-            missed = any(c.high >= tp for c in candles[breakout_at:])
+            tp = reward_target(float(candles[breakout_at].close), yellow.high - after_low, buy=True)
+            missed_at = next(
+                (i for i in range(breakout_at, len(candles)) if candles[i].high >= tp),
+                None,
+            )
             extra.update(
                 {
                     "sweep_low": str(after_low),
                     "stop_loss": str(sl),
                     "take_profit": str(tp),
                     "stage_log": _buy_stage_log(
-                        reds_ready=True,
+                        candles,
+                        yellow_at=y,
+                        reds=reds,
                         sweep_at=sweep_at,
                         breakout_at=breakout_at,
-                        gapped=False,
-                        missed=missed,
+                        gap_at=None,
+                        missed_at=missed_at,
                     ),
                 }
             )
+            missed = missed_at is not None
             if missed:
                 extra["missed_target"] = "1"
             else:
@@ -377,7 +411,7 @@ class SweepBreakoutStrategy:
             if only_index is None and b >= len(candles) - 3:
                 continue
             blue = candles[b]
-            greens_ready = _two_greens_on_the_lower_side(candles, b)
+            greens = _two_greens_on_the_lower_side(candles, b)
             sweep_at = next(
                 (i for i in range(b + 1, len(candles)) if candles[i].high > blue.high),
                 None,
@@ -391,11 +425,16 @@ class SweepBreakoutStrategy:
                     breakdown_at = i
                     break
             gap_end = breakdown_at + 1 if breakdown_at is not None else len(candles)
-            gapped = any(
-                is_green(c) and unattached_above(c, blue) for c in candles[b + 1 : gap_end]
+            gap_at = next(
+                (
+                    i
+                    for i in range(b + 1, gap_end)
+                    if is_green(candles[i]) and unattached_above(candles[i], blue)
+                ),
+                None,
             )
             ready = (
-                greens_ready and sweep_at is not None and breakdown_at is not None and not gapped
+                bool(greens) and sweep_at is not None and breakdown_at is not None and gap_at is None
             )
             sl = 0.0
             extra: dict[str, str] = {
@@ -406,17 +445,19 @@ class SweepBreakoutStrategy:
                 "retest_level": str(blue.low),
                 "anchor_time": str(_ts(blue)),
                 "stage_log": _sell_stage_log(
-                    greens_ready=greens_ready,
+                    candles,
+                    blue_at=b,
+                    greens=greens,
                     sweep_at=sweep_at,
                     breakdown_at=breakdown_at,
-                    gapped=gapped,
-                    missed=False,
+                    gap_at=gap_at,
+                    missed_at=None,
                 ),
             }
             if not ready:
                 if only_index is None:
                     continue
-                extra["setup_invalid"] = "1" if gapped else "0"
+                extra["setup_invalid"] = "1" if gap_at is not None else "0"
                 return sl, extra
             end = max(sweep_at, breakdown_at)
             after = candles[b + 1 : end + 1]
@@ -426,22 +467,28 @@ class SweepBreakoutStrategy:
                     continue
                 return sl, extra
             sl = round(max(after_high, blue.high) + self.sl_offset, 5)
-            tp = target_from_entry(blue.low, after_high, buy=False)
-            missed = any(c.low <= tp for c in candles[breakdown_at:])
+            tp = reward_target(float(candles[breakdown_at].close), after_high - blue.low, buy=False)
+            missed_at = next(
+                (i for i in range(breakdown_at, len(candles)) if candles[i].low <= tp),
+                None,
+            )
             extra.update(
                 {
                     "sweep_high": str(after_high),
                     "stop_loss": str(sl),
                     "take_profit": str(tp),
                     "stage_log": _sell_stage_log(
-                        greens_ready=True,
+                        candles,
+                        blue_at=b,
+                        greens=greens,
                         sweep_at=sweep_at,
                         breakdown_at=breakdown_at,
-                        gapped=False,
-                        missed=missed,
+                        gap_at=None,
+                        missed_at=missed_at,
                     ),
                 }
             )
+            missed = missed_at is not None
             if missed:
                 extra["missed_target"] = "1"
             else:

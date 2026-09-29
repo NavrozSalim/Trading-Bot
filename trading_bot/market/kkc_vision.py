@@ -10,8 +10,11 @@ The rightmost candle is still forming and is not classified.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -371,6 +374,12 @@ class ScreenColorReader:
     def __init__(self, path: Path = CONFIG_PATH) -> None:
         self.path = path
         self.vision = load_vision(path)
+        self._market_memory = ColorMemory()
+        self._scale: tuple[float, float] | None = None
+        self._candle_count = 0
+        self._last_fit = 0.0
+        self.last_bars = 0
+        self._last_zoom = ("", 0.0)
 
     @property
     def ready(self) -> bool:
@@ -395,6 +404,165 @@ class ScreenColorReader:
             bars=len(colors),
         )
         return colors
+
+    async def read_market(self):
+        """Candle prices and colors from the on-screen chart. None if the scale cannot be read."""
+        from trading_bot.market.chart_prices import ChartMarket, candle_run_count, market_from_bgr
+
+        self.vision = load_vision(self.path)
+        if not self.vision.ready:
+            log.info("kkc_roi_not_calibrated")
+            return None
+        try:
+            image = await asyncio.to_thread(_grab_roi, self.vision)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kkc_capture_failed", error=str(exc))
+            return None
+        self.last_bars = await asyncio.to_thread(candle_run_count, image)
+        market = await asyncio.to_thread(
+            market_from_bgr,
+            image,
+            self.vision,
+            datetime.now().astimezone(),
+            self._scale,
+        )
+        if market is None:
+            return None
+        if market.scale is not None:
+            if self._scale is not None and abs(_scale_mid(market.scale, image.shape[0]) - _scale_mid(self._scale, image.shape[0])) > 30:
+                self._market_memory = ColorMemory()
+            self._scale = market.scale
+        if self._candle_count and abs(len(market.closed) - self._candle_count) > 8:
+            self._market_memory = ColorMemory()
+        self._candle_count = len(market.closed)
+        held = self._market_memory.apply(
+            [str(candle.timestamp) for candle in market.closed],
+            market.colors,
+        )
+        if held is None:
+            return None
+        return ChartMarket(
+            closed=market.closed,
+            forming=market.forming,
+            colors=held,
+            fresh_colors=list(market.colors),
+            scale=market.scale,
+            clipped=market.clipped,
+            price_span=market.price_span,
+        )
+
+    async def adjust_zoom(self, action: str) -> bool:
+        """One zoom step toward about 45 candles and 14 points of price. Skips the trade."""
+        now = time.monotonic()
+        previous, when = self._last_zoom
+        opposite = {"time-in": "time-out", "time-out": "time-in", "price-in": "price-out", "price-out": "price-in"}
+        if previous == opposite.get(action) and now - when < 60:
+            log.info("chart_zoom_held", action=action)
+            return False
+        point = await self._zoom_point(action)
+        if point is None:
+            log.info("chart_zoom_skipped", action=action)
+            return False
+        self._last_zoom = (action, now)
+        self._scale = None
+        self._market_memory = ColorMemory()
+        self._candle_count = 0
+        notches = 2 if action.endswith("in") else -2
+        await asyncio.to_thread(_scroll_at, point[0], point[1], notches)
+        log.info("chart_zoom", action=action, x=point[0], y=point[1])
+        return True
+
+    async def _zoom_point(self, action: str) -> tuple[int, int] | None:
+        if action.startswith("time"):
+            return (
+                self.vision.x + int(self.vision.width * 0.35),
+                self.vision.y + int(self.vision.height * 0.45),
+            )
+        try:
+            image = await asyncio.to_thread(_grab_roi, self.vision)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kkc_capture_failed", error=str(exc))
+            return None
+        return _price_scale_point(image, self.vision)
+
+    async def fit_price_scale(self) -> bool:
+        """Double-click the TradingView price scale so a candle cut off at the edge comes back into view."""
+        self._scale = None
+        now = time.monotonic()
+        if now - self._last_fit < 45:
+            return False
+        try:
+            image = await asyncio.to_thread(_grab_roi, self.vision)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kkc_capture_failed", error=str(exc))
+            return False
+        point = _price_scale_point(image, self.vision)
+        if point is None:
+            log.info("price_scale_fit_skipped", reason="price scale is not inside the chart box")
+            return False
+        self._last_fit = now
+        await asyncio.to_thread(_double_click, point[0], point[1])
+        log.info("price_scale_fit", x=point[0], y=point[1])
+        return True
+
+
+def _scale_mid(scale: tuple[float, float], height: int) -> float:
+    slope, intercept = scale
+    return float(intercept + slope * (height / 2.0))
+
+
+def _price_scale_point(image: np.ndarray, vision: ChartVision) -> tuple[int, int] | None:
+    """A quiet spot on the price scale, in screen pixels. None if that strip is still candles."""
+    import cv2
+
+    height, width = image.shape[:2]
+    if width < 80 or height < 40:
+        return None
+    strip = image[:, width - 70 :]
+    hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+    if float((hsv[:, :, 1] > 50).mean()) > 0.12:
+        return None
+    dark = strip.mean(axis=2) < 80
+    y0, y1 = int(height * 0.20), int(height * 0.50)
+    quiet = [y for y in range(y0, y1) if float(dark[y].mean()) < 0.08]
+    if not quiet:
+        return None
+    return vision.x + width - 35, vision.y + quiet[len(quiet) // 2]
+
+
+def _scroll_at(x: int, y: int, notches: int) -> None:
+    user32 = ctypes.windll.user32
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    previous = POINT()
+    user32.GetCursorPos(ctypes.byref(previous))
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    step = 120 if notches > 0 else -120
+    for _ in range(abs(notches)):
+        user32.mouse_event(0x0800, 0, 0, step, 0)
+        time.sleep(0.04)
+    user32.SetCursorPos(previous.x, previous.y)
+
+
+def _double_click(x: int, y: int) -> None:
+    user32 = ctypes.windll.user32
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    previous = POINT()
+    user32.GetCursorPos(ctypes.byref(previous))
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    for _ in range(2):
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        time.sleep(0.02)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+        time.sleep(0.06)
+    user32.SetCursorPos(previous.x, previous.y)
 
 
 def _grab_roi(vision: ChartVision) -> np.ndarray:
