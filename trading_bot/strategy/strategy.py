@@ -6,9 +6,10 @@ starts a sell. If the chart is open and neither color is seen, there is no trade
 Without chart colors (unit tests only) the anchor is found from price structure.
 
 BUY
-- Two red candles while price is falling, on the upper side of the yellow
-- A green may sit between those reds and the yellow. The candles stay attached. A gap does not.
-- A later candle (not required to be the next one) sweeps the yellow low
+- Two red candles in the fall before the yellow, within about 10 bars
+- A green may sit between those reds, and between the reds and the yellow
+- Those reds do not have to touch each other or the yellow
+- The yellow candle is the sweep when its low is below the candle before it. A later candle that trades below the yellow low is also the sweep
 - At least two green candles. They need not be consecutive
 - The breakout is the green that closes above the yellow high. Wait for that close
 - The two reds, the sweep, and the breakout can finish in any order
@@ -17,12 +18,13 @@ BUY
 - After that close, later candles may be any color. The buy stays until the touch
 - A red after the last yellow, up through the breakout, must touch the yellow. Body or wick is enough
 - A red that does not touch the yellow cancels the buy. Reds after the breakout are not checked
-- If price reaches the 1:1.8 target before the retest, the yellow is finished and there is no buy
+- If price reaches the 1:1.8 price before the retest, the yellow is finished and there is no buy
 
 SELL is the mirror
-- Two green candles while price is rising, on the lower side of the blue
-- A red may sit between those greens and the blue. The candles stay attached. A gap does not.
-- A later candle sweeps the blue high
+- Two green candles in the rise before the blue, within about 10 bars
+- A red may sit between those greens, and between the greens and the blue
+- Those greens do not have to touch each other or the blue
+- The blue candle is the sweep when its high is above the candle before it. A later candle that trades above the blue high is also the sweep
 - At least two red candles, not necessarily consecutive
 - The breakdown is the red that closes below the blue low. Wait for that close
 - The two greens, the sweep, and the breakdown can finish in any order
@@ -31,12 +33,14 @@ SELL is the mirror
 - After that close, later candles may be any color. The sell stays until the touch
 - A green after the last blue, up through the breakdown, must touch the blue. Body or wick is enough
 - A green that does not touch the blue cancels the sell. Greens after the breakdown are not checked
-- If price reaches the 1:1.8 target before the retest, the blue is finished and there is no sell
+- If price reaches the 1:1.8 price before the retest, the blue is finished and there is no sell
 
 Stop is 0.80 beyond the extreme from the colored candle through the breakout or breakdown.
-The 1:1.8 target is measured from the breakout or breakdown close.
 Risk is the yellow top minus the sweep low, or the sweep high minus the blue bottom.
-Target distance is that risk times 1.8. A breakout at 4501.5 with 500 points of risk targets 4510.5.
+The target is 1:1: the breakout or breakdown close plus or minus that risk.
+A breakout at 4501.5 with 500 points of risk targets 4506.5.
+The setup is cancelled if price reaches 1.8 times the risk from that close before the retest (4510.5).
+Reaching 1:1 before the retest does not cancel it.
 The order is sent at the retest. The breakout close is not the entry. Never touches Playwright or MT5.
 """
 
@@ -65,11 +69,6 @@ def is_green(candle: CandleLike) -> bool:
     return candle.close > candle.open
 
 
-def ranges_attached(a: CandleLike, b: CandleLike) -> bool:
-    """True when two candles overlap or touch. A gap is un-attached."""
-    return a.low <= b.high and a.high >= b.low
-
-
 def unattached_below(candle: CandleLike, ref: CandleLike) -> bool:
     return candle.high < ref.low
 
@@ -82,12 +81,13 @@ def _ts(candle: CandleLike) -> Any:
     return getattr(candle, "timestamp", "1970-01-01T00:00")
 
 
-REWARD_R = 1.8
+REWARD_R = 1.0
+CANCEL_R = 1.8
 
 
-def reward_target(breakout_price: float, risk: float, *, buy: bool) -> float:
-    """1:1.8 target from the breakout close. Risk is the sweep distance, without the 0.80 stop."""
-    distance = risk * REWARD_R
+def reward_target(breakout_price: float, risk: float, *, buy: bool, ratio: float = REWARD_R) -> float:
+    """Price `ratio` times the sweep distance from the breakout close. The 0.80 stop is not in the distance."""
+    distance = risk * ratio
     if buy:
         return round(breakout_price + distance, 5)
     return round(breakout_price - distance, 5)
@@ -117,44 +117,55 @@ def body_outside_fraction(candle: CandleLike, edge: float, *, side: str) -> floa
     return min(1.0, outside / body)
 
 
-def _two_reds_on_the_upper_side(candles: Sequence[CandleLike], index: int) -> list[CandleLike]:
-    """Two reds in the attached fall into the yellow. A green may sit between them."""
+def _buy_sweep_at(candles: Sequence[CandleLike], index: int, *, include_own: bool) -> int | None:
+    """A later candle below the yellow low, or the yellow itself when its low is below the candle before it.
+
+    The yellow's own low counts only for the painted candle. A price-only scan
+    still needs a later candle, so an ordinary red is not treated as a yellow.
+    """
     yellow = candles[index]
-    reds: list[CandleLike] = []
-    previous = yellow
-    for cursor in range(index - 1, max(-1, index - 11), -1):
-        candle = candles[cursor]
-        if not ranges_attached(candle, previous):
-            break
-        previous = candle
-        if is_red(candle):
-            reds.append(candle)
-        if len(reds) >= 2 and any(red.high >= yellow.high for red in reds):
-            return list(reversed(reds))
-    return []
+    later = next((i for i in range(index + 1, len(candles)) if candles[i].low < yellow.low), None)
+    if later is not None:
+        return later
+    if include_own and index > 0 and yellow.low < candles[index - 1].low:
+        return index
+    return None
+
+
+def _sell_sweep_at(candles: Sequence[CandleLike], index: int, *, include_own: bool) -> int | None:
+    """A later candle above the blue high, or the blue itself when its high is above the candle before it."""
+    blue = candles[index]
+    later = next((i for i in range(index + 1, len(candles)) if candles[i].high > blue.high), None)
+    if later is not None:
+        return later
+    if include_own and index > 0 and blue.high > candles[index - 1].high:
+        return index
+    return None
+
+
+def _two_reds_on_the_upper_side(candles: Sequence[CandleLike], index: int) -> list[CandleLike]:
+    """Two reds in the 10 candles before the yellow. They do not have to touch it."""
+    reds = [candle for candle in candles[max(0, index - 10) : index] if is_red(candle)]
+    if len(reds) < 2:
+        return []
+    return reds[-2:]
 
 
 def _two_greens_on_the_lower_side(candles: Sequence[CandleLike], index: int) -> list[CandleLike]:
-    """Two greens in the attached rise into the blue. A red may sit between them."""
-    blue = candles[index]
-    greens: list[CandleLike] = []
-    previous = blue
-    for cursor in range(index - 1, max(-1, index - 11), -1):
-        candle = candles[cursor]
-        if not ranges_attached(candle, previous):
-            break
-        previous = candle
-        if is_green(candle):
-            greens.append(candle)
-        if len(greens) >= 2 and any(green.low <= blue.low for green in greens):
-            return list(reversed(greens))
-    return []
+    """Two greens in the 10 candles before the blue. They do not have to touch it."""
+    greens = [candle for candle in candles[max(0, index - 10) : index] if is_green(candle)]
+    if len(greens) < 2:
+        return []
+    return greens[-2:]
 
 
 def _clock(candle: CandleLike) -> str:
+    from trading_bot.market.match import server_to_chart_time
+
     stamp = getattr(candle, "timestamp", None)
     if hasattr(stamp, "strftime"):
-        return str(stamp.strftime("%H:%M"))
+        shown = server_to_chart_time(stamp) if hasattr(stamp, "tzinfo") else stamp
+        return str(shown.strftime("%H:%M"))
     match = re.search(r"(\d{2}:\d{2})", str(stamp or ""))
     return match.group(1) if match else ""
 
@@ -203,7 +214,7 @@ def _buy_stage_log(
     if gap_at is not None:
         lines.append(_timed("SETUP INVALID — RED DOES NOT TOUCH THE YELLOW", candles[gap_at]))
     elif missed_at is not None:
-        lines.append(_timed("SETUP INVALID — 1:1.8 TARGET REACHED WITHOUT A RETEST", candles[missed_at]))
+        lines.append(_timed("SETUP INVALID — 1:1.8 PRICE REACHED WITHOUT A RETEST", candles[missed_at]))
     elif reds and sweep_at is not None and breakout_at is not None:
         lines.append("SETUP COMPLETE — WAITING FOR RETEST")
     return " | ".join(lines)
@@ -232,7 +243,7 @@ def _sell_stage_log(
     if gap_at is not None:
         lines.append(_timed("SETUP INVALID — GREEN DOES NOT TOUCH THE BLUE", candles[gap_at]))
     elif missed_at is not None:
-        lines.append(_timed("SETUP INVALID — 1:1.8 TARGET REACHED WITHOUT A RETEST", candles[missed_at]))
+        lines.append(_timed("SETUP INVALID — 1:1.8 PRICE REACHED WITHOUT A RETEST", candles[missed_at]))
     elif greens and sweep_at is not None and breakdown_at is not None:
         lines.append("SETUP COMPLETE — WAITING FOR RETEST")
     return " | ".join(lines)
@@ -317,10 +328,7 @@ class SweepBreakoutStrategy:
                 continue
             yellow = candles[y]
             reds = _two_reds_on_the_upper_side(candles, y)
-            sweep_at = next(
-                (i for i in range(y + 1, len(candles)) if candles[i].low < yellow.low),
-                None,
-            )
+            sweep_at = _buy_sweep_at(candles, y, include_own=only_index is not None)
             breakout_at = None
             for i in range(y + 1, len(candles)):
                 if not (is_green(candles[i]) and candles[i].close > yellow.high):
@@ -347,6 +355,7 @@ class SweepBreakoutStrategy:
                 "last_yellow": "1",
                 "retest_level": str(yellow.high),
                 "anchor_time": str(_ts(yellow)),
+                "setup_clock": _clock(yellow),
                 "stage_log": _buy_stage_log(
                     candles,
                     yellow_at=y,
@@ -363,23 +372,30 @@ class SweepBreakoutStrategy:
                 extra["setup_invalid"] = "1" if gap_at is not None else "0"
                 return sl, extra
             end = max(sweep_at, breakout_at)
-            after = candles[y + 1 : end + 1]
-            after_low = min(c.low for c in after)
+            window = candles[y : end + 1]
+            after_low = min(c.low for c in window)
+            sweep_candle = min(window, key=lambda candle: candle.low)
             if after_low >= yellow.high:
                 if only_index is None:
                     continue
                 return sl, extra
             sl = round(min(after_low, yellow.low) - self.sl_offset, 5)
-            tp = reward_target(float(candles[breakout_at].close), yellow.high - after_low, buy=True)
+            breakout_close = float(candles[breakout_at].close)
+            tp = reward_target(breakout_close, yellow.high - after_low, buy=True)
+            cancel = reward_target(breakout_close, yellow.high - after_low, buy=True, ratio=CANCEL_R)
             missed_at = next(
-                (i for i in range(breakout_at, len(candles)) if candles[i].high >= tp),
+                (i for i in range(breakout_at, len(candles)) if candles[i].high >= cancel),
                 None,
             )
             extra.update(
                 {
                     "sweep_low": str(after_low),
+                    "sweep_clock": _clock(sweep_candle),
+                    "breakout_close": str(breakout_close),
+                    "breakout_clock": _clock(candles[breakout_at]),
                     "stop_loss": str(sl),
                     "take_profit": str(tp),
+                    "cancel_price": str(cancel),
                     "stage_log": _buy_stage_log(
                         candles,
                         yellow_at=y,
@@ -412,10 +428,7 @@ class SweepBreakoutStrategy:
                 continue
             blue = candles[b]
             greens = _two_greens_on_the_lower_side(candles, b)
-            sweep_at = next(
-                (i for i in range(b + 1, len(candles)) if candles[i].high > blue.high),
-                None,
-            )
+            sweep_at = _sell_sweep_at(candles, b, include_own=only_index is not None)
             breakdown_at = None
             for i in range(b + 1, len(candles)):
                 if not (is_red(candles[i]) and candles[i].close < blue.low):
@@ -444,6 +457,7 @@ class SweepBreakoutStrategy:
                 "last_blue": "1",
                 "retest_level": str(blue.low),
                 "anchor_time": str(_ts(blue)),
+                "setup_clock": _clock(blue),
                 "stage_log": _sell_stage_log(
                     candles,
                     blue_at=b,
@@ -460,23 +474,30 @@ class SweepBreakoutStrategy:
                 extra["setup_invalid"] = "1" if gap_at is not None else "0"
                 return sl, extra
             end = max(sweep_at, breakdown_at)
-            after = candles[b + 1 : end + 1]
-            after_high = max(c.high for c in after)
+            window = candles[b : end + 1]
+            after_high = max(c.high for c in window)
+            sweep_candle = max(window, key=lambda candle: candle.high)
             if after_high <= blue.low:
                 if only_index is None:
                     continue
                 return sl, extra
             sl = round(max(after_high, blue.high) + self.sl_offset, 5)
-            tp = reward_target(float(candles[breakdown_at].close), after_high - blue.low, buy=False)
+            breakdown_close = float(candles[breakdown_at].close)
+            tp = reward_target(breakdown_close, after_high - blue.low, buy=False)
+            cancel = reward_target(breakdown_close, after_high - blue.low, buy=False, ratio=CANCEL_R)
             missed_at = next(
-                (i for i in range(breakdown_at, len(candles)) if candles[i].low <= tp),
+                (i for i in range(breakdown_at, len(candles)) if candles[i].low <= cancel),
                 None,
             )
             extra.update(
                 {
                     "sweep_high": str(after_high),
+                    "sweep_clock": _clock(sweep_candle),
+                    "breakout_close": str(breakdown_close),
+                    "breakout_clock": _clock(candles[breakdown_at]),
                     "stop_loss": str(sl),
                     "take_profit": str(tp),
+                    "cancel_price": str(cancel),
                     "stage_log": _sell_stage_log(
                         candles,
                         blue_at=b,

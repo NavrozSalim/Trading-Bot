@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,13 @@ from trading_bot.database.database import Database
 from trading_bot.exceptions import DuplicateSignalError, KillSwitchActive, RiskLimitError
 from trading_bot.market.chart_prices import zoom_action
 from trading_bot.market.kkc_vision import ColorMemory
+from trading_bot.market.match import (
+    align_paint,
+    chart_match,
+    chart_offset,
+    paint_by_time,
+    server_to_chart_time,
+)
 from trading_bot.monitoring.health_monitor import HealthMonitor
 from trading_bot.monitoring.logger import get_logger, log_action
 from trading_bot.safety.duplicate_protection import DuplicateProtection
@@ -22,10 +30,15 @@ from trading_bot.trading.executor import OrderRequest, OrderResult, TradingExecu
 from trading_bot.trading.mt5_terminal import Mt5Terminal
 from trading_bot.trading.position_manager import PositionManager
 from trading_bot.trading.position_sizer import calculate_lot
-from trading_bot.trading.trade_excel import TradeExcel
+from trading_bot.trading.trade_excel import TradeExcel, with_clock
 from trading_bot.trading.risk_manager import RiskManager
 
 log = get_logger("trading_bot.engine")
+
+_BARS = 80
+_MATCH_REACH = 180
+_MATCH_MIN_VOTES = 8
+_MATCH_MIN_AGREE = 0.75
 
 
 class _ExpiredSetups:
@@ -65,6 +78,17 @@ def _sizing_extreme(signal: Signal) -> float | None:
         return None
 
 
+def _lot_entry(signal: Signal, price: float) -> float:
+    """Yellow high, or blue low. The lot uses that price to the sweep, not the fill."""
+    raw = signal.extra.get("retest_level")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(signal.price or price)
+
+
 class SignalEngine:
     def __init__(
         self,
@@ -97,6 +121,9 @@ class SignalEngine:
         self._ticket_anchor: dict[str, str] = {}
         self._stage_anchor = ""
         self._fresh_misses = 0
+        self._startup_bar = None
+        self._chart_read = ""
+        self._last_skip = ("", 0.0)
         self.color_reader = None
         self._color_memory = ColorMemory()
         self.journal = TradeExcel(settings.logs_dir.parent / "data" / "trades.xlsx")
@@ -110,6 +137,91 @@ class SignalEngine:
         if anchor:
             self._stage_anchor = anchor
         return text
+
+    def _say(self, **kwargs) -> None:
+        log_action(chart_read=self._chart_read or None, **kwargs)
+
+    def _clocks(self, candles: list, colors: list[str], name: str) -> list[str]:
+        times: list[str] = []
+        for candle, color in zip(candles, colors):
+            if color == name:
+                times.append(server_to_chart_time(candle.timestamp).strftime("%H:%M"))
+        return times
+
+    def _note_chart_read(
+        self,
+        candles: list,
+        seen: list[str] | None,
+        kept: list[str] | None,
+        shift_minutes: int,
+    ) -> None:
+        """What this picture showed, in chart time, before the decision."""
+        if not seen or len(seen) != len(candles):
+            self._chart_read = "the picture was not read"
+            return
+        kept = kept if kept is not None and len(kept) == len(candles) else [""] * len(candles)
+        yellow_kept = self._clocks(candles, [c if k == "yellow" else "" for c, k in zip(seen, kept)], "yellow")
+        yellow_old = self._clocks(
+            candles,
+            [c if c == "yellow" and k != "yellow" else "" for c, k in zip(seen, kept)],
+            "yellow",
+        )
+        blue_kept = self._clocks(candles, [c if k == "blue" else "" for c, k in zip(seen, kept)], "blue")
+        blue_old = self._clocks(
+            candles,
+            [c if c == "blue" and k != "blue" else "" for c, k in zip(seen, kept)],
+            "blue",
+        )
+        summary = f"{len(yellow_kept) + len(yellow_old)} yellow, {len(blue_kept) + len(blue_old)} blue"
+        if shift_minutes < -5:
+            summary += (
+                f". The chart is scrolled {abs(shift_minutes)} minutes back from the newest candle"
+            )
+        elif shift_minutes:
+            way = "back" if shift_minutes < 0 else "forward"
+            summary += f". Clock moved {way} {abs(shift_minutes)} minutes"
+        rows = [summary + "."]
+        if yellow_kept or yellow_old:
+            row = "Yellow: " + ", ".join(yellow_kept + yellow_old)
+            if yellow_old and not yellow_kept:
+                row += " — already on the chart at startup, ignored"
+            elif yellow_old:
+                row += ". " + ", ".join(yellow_old) + " already on the chart at startup, ignored"
+            rows.append(row + ".")
+        if blue_kept or blue_old:
+            row = "Blue: " + ", ".join(blue_kept + blue_old)
+            if blue_old and not blue_kept:
+                row += " — already on the chart at startup, ignored"
+            elif blue_old:
+                row += ". " + ", ".join(blue_old) + " already on the chart at startup, ignored"
+            rows.append(row + ".")
+        self._chart_read = "\n".join(rows)
+
+    @staticmethod
+    def _chart_shift(chart_candles: list, history: list, candles: list):
+        """Minutes that move the picture onto MT5's bars. None if the picture is not MT5's chart."""
+        sided = sum(1 for candle in chart_candles if candle.close != candle.open)
+        if sided < _MATCH_MIN_VOTES:
+            return chart_offset(chart_candles, candles)
+        shift, agree, votes = chart_match(chart_candles, history, _MATCH_REACH)
+        if votes < _MATCH_MIN_VOTES or agree < votes * _MATCH_MIN_AGREE:
+            log.info(
+                "chart_does_not_match_mt5",
+                agree=agree,
+                votes=votes,
+                minutes=int(shift.total_seconds() // 60),
+            )
+            return None
+        return shift
+
+    def _drop_old_paint(self, candles: list, colors: list[str] | None) -> list[str] | None:
+        """A yellow or blue already on the chart at startup is old. It is not shown or traded."""
+        if colors is None or self._startup_bar is None:
+            return colors
+        if len(colors) != len(candles):
+            return colors
+        cutoff = self._startup_bar
+        return ["" if candle.timestamp <= cutoff else color for candle, color in zip(candles, colors)]
 
     def _expire_anchor(self, signal: Signal) -> None:
         anchor = str(signal.extra.get("anchor_time", ""))
@@ -131,29 +243,55 @@ class SignalEngine:
         symbol = self.settings.mt5_symbol
         chart_colors: list[str] | None = None
         fresh_colors: list[str] | None = None
+        shift_minutes = 0
         if self.color_reader is not None and hasattr(self.color_reader, "read_market"):
             market = await self.color_reader.read_market()
-            if market is None:
-                if await self._zoom_chart(symbol, int(getattr(self.color_reader, "last_bars", 0) or 0), None):
-                    return
-                await self._log_unreadable_chart(symbol)
-                return
-            if market.clipped:
+            candles_on_screen = market is not None and 40 <= len(market.closed) <= 55
+            if market is not None and market.clipped and not candles_on_screen:
                 fit = getattr(self.color_reader, "fit_price_scale", None)
                 if fit is not None:
                     await fit()
                 await self._log_cut_off_candle(symbol)
                 return
-            if await self._zoom_chart(symbol, len(market.closed), market.price_span):
+            if market is not None and await self._zoom_chart(symbol, len(market.closed), market.price_span):
                 return
-            candles = market.closed
-            forming = market.forming
-            chart_colors = list(market.colors)
-            fresh_colors = list(market.fresh_colors or market.colors)
-            price = float(forming.close)
+            history = await asyncio.to_thread(
+                self.terminal.closed_candles, symbol, self.settings.timeframe, _BARS + _MATCH_REACH
+            )
+            candles = list(history[-_BARS:]) if history else []
+            if not candles:
+                await self._log_unreadable_chart(symbol)
+                return
+            forming = await self._forming_candle(symbol)
+            if market is None:
+                paint = await self._paint_without_a_price_scale(candles)
+                if paint is None:
+                    await self._log_unreadable_chart(symbol)
+                    return
+                chart_colors, fresh_colors = paint
+            else:
+                shift = self._chart_shift(market.closed, list(history), candles)
+                if shift is None:
+                    await self._log_unreadable_chart(
+                        symbol,
+                        "CHART DOES NOT MATCH MT5 — the red and green candles in the picture are not "
+                        "MT5's candles (chart covered, moved, or on another symbol), so this check did not trade",
+                    )
+                    return
+                shift_minutes = int(shift.total_seconds() // 60)
+                if shift_minutes:
+                    log.info("chart_times_shifted", minutes=shift_minutes)
+                chart_times = [candle.timestamp + shift for candle in market.closed]
+                bar_times = [candle.timestamp for candle in candles]
+                picture = market.fresh_colors if market.fresh_colors is not None else market.colors
+                fresh_colors = paint_by_time(chart_times, list(picture), bar_times)
+                chart_colors = self._color_memory.apply(
+                    [str(candle.timestamp) for candle in candles], fresh_colors
+                )
+            price = float(forming.close) if forming is not None else float(candles[-1].close)
         else:
             candles = await asyncio.to_thread(
-                self.terminal.closed_candles, symbol, self.settings.timeframe, 80
+                self.terminal.closed_candles, symbol, self.settings.timeframe, _BARS
             )
             if not candles:
                 return
@@ -163,6 +301,19 @@ class SignalEngine:
             return
         last_ts = str(candles[-1].timestamp)
         self.health.update(current_price=str(price), current_symbol=symbol)
+        if self._startup_bar is None:
+            self._startup_bar = candles[-1].timestamp
+        seen = list(fresh_colors) if fresh_colors is not None else None
+        chart_colors = self._drop_old_paint(candles, chart_colors)
+        fresh_colors = self._drop_old_paint(candles, fresh_colors)
+        if self.color_reader is not None:
+            self._note_chart_read(candles, seen, fresh_colors, shift_minutes)
+        else:
+            self._chart_read = ""
+        if await self._trade_is_open(symbol):
+            if self._last_closed_ts is None:
+                self._last_closed_ts = last_ts
+            return
         if fresh_colors is not None:
             self._note_fresh_colors(fresh_colors)
         if await self._try_retest_entry(forming, symbol):
@@ -170,6 +321,14 @@ class SignalEngine:
         if self._last_closed_ts is None:
             self._last_closed_ts = last_ts
             log.info("engine_synced_to_last_closed_candle", timestamp=last_ts)
+            self._say(
+                symbol=symbol,
+                timeframe=self.settings.timeframe,
+                signal="NO_TRADE",
+                signal_reason="first check after startup — syncing, no trade",
+                current_price=price,
+                trade_action="NO_TRADE",
+            )
             return
         if last_ts == self._last_closed_ts:
             await self._review_same_candle(candles, symbol, price, chart_colors)
@@ -186,7 +345,7 @@ class SignalEngine:
         if signal.extra.get("missed_target") == "1":
             self._expire_anchor(signal)
             self._pending = None
-            log_action(
+            self._say(
                 symbol=symbol,
                 timeframe=self.settings.timeframe,
                 signal=signal.extra.get("pattern", "NO_TRADE"),
@@ -201,7 +360,7 @@ class SignalEngine:
         if signal.extra.get("await_retest") == "1":
             if self._expired_setups.contains(signal):
                 self._pending = None
-                log_action(
+                self._say(
                     symbol=symbol,
                     timeframe=self.settings.timeframe,
                     signal=signal.extra.get("pattern", "NO_TRADE"),
@@ -222,7 +381,7 @@ class SignalEngine:
                 self._pending = signal
                 if await self._try_retest_entry(forming, symbol):
                     return
-            log_action(
+            self._say(
                 symbol=symbol,
                 timeframe=self.settings.timeframe,
                 signal=signal.extra.get("pattern", "NO_TRADE"),
@@ -236,7 +395,7 @@ class SignalEngine:
             return
         self._pending = None
         if signal.signal is SignalType.NO_TRADE:
-            log_action(
+            self._say(
                 symbol=symbol,
                 timeframe=self.settings.timeframe,
                 signal=signal.signal.value,
@@ -247,6 +406,24 @@ class SignalEngine:
             )
             return
         await self._handle_entry(signal, price, account)
+
+    async def _paint_without_a_price_scale(self, candles: list) -> tuple[list[str], list[str]] | None:
+        """Colors only. A failed price-scale read does not zoom and does not block the setup."""
+        reader = self.color_reader
+        if reader is None or not hasattr(reader, "colors_for"):
+            return None
+        try:
+            fresh = await reader.colors_for(len(candles))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("kkc_capture_failed", error=str(exc))
+            return None
+        if not fresh:
+            return None
+        raw = align_paint(list(fresh), len(candles))
+        held = self._color_memory.apply([str(candle.timestamp) for candle in candles], raw)
+        if held is None:
+            return None
+        return held, raw
 
     async def _chart_colors(self, candles: list) -> list[str] | None:
         reader = self.color_reader
@@ -297,11 +474,12 @@ class SignalEngine:
             return False
         level = float(pending.extra.get("retest_level", "0"))
         buy = str(pending.extra.get("pattern", "")).startswith("buy")
-        if pending.take_profit is not None and self._forming_reached_target(forming, pending.take_profit, buy):
+        cancel = pending.extra.get("cancel_price") or pending.take_profit
+        if cancel is not None and self._forming_reached_target(forming, float(cancel), buy):
             self._expire_anchor(pending)
             self._pending = None
             account = await self._account_view()
-            log_action(
+            self._say(
                 symbol=symbol,
                 timeframe=self.settings.timeframe,
                 signal=pending.extra.get("pattern", "NO_TRADE"),
@@ -317,7 +495,7 @@ class SignalEngine:
                 **account,
             )
             return True
-        touched = forming.low <= level if buy else forming.high >= level
+        touched = float(forming.low) <= level <= float(forming.high)
         if not touched:
             return False
         account = await self._account_view()
@@ -325,7 +503,7 @@ class SignalEngine:
             self._pending = None
             return False
         side = SignalType.BUY if buy else SignalType.SELL
-        entry = float(forming.close)
+        entry = level
         order = Signal(
             signal=side,
             reason="retest_touch",
@@ -355,7 +533,7 @@ class SignalEngine:
 
     async def _log_chart_zoom(self, symbol: str) -> None:
         account = await self._account_view()
-        log_action(
+        self._say(
             symbol=symbol,
             timeframe=self.settings.timeframe,
             signal="NO_TRADE",
@@ -369,7 +547,7 @@ class SignalEngine:
 
     async def _log_cut_off_candle(self, symbol: str) -> None:
         account = await self._account_view()
-        log_action(
+        self._say(
             symbol=symbol,
             timeframe=self.settings.timeframe,
             signal="NO_TRADE",
@@ -381,19 +559,38 @@ class SignalEngine:
             **account,
         )
 
-    async def _log_unreadable_chart(self, symbol: str) -> None:
+    async def _trade_is_open(self, symbol: str) -> bool:
+        """A filled trade ignores a new yellow or blue until its stop or target."""
         account = await self._account_view()
-        log_action(
+        if int(account["open_trades"]) <= 0:
+            return False
+        self._say(
             symbol=symbol,
             timeframe=self.settings.timeframe,
             signal="NO_TRADE",
             signal_reason=(
-                "CHART PRICES NOT READ — hide the price tag and keep the full numbers, "
-                "like 4,160, inside the chart box"
+                "A trade is open. A new yellow or blue waits until the stop or the target."
             ),
             trade_action="NO_TRADE",
             **account,
         )
+        return True
+
+    async def _log_unreadable_chart(self, symbol: str, reason: str | None = None) -> None:
+        self._chart_read = "the picture was not read"
+        reason = reason or (
+            "CHART NOT READ — the picture was not understood, so this check did not trade"
+        )
+        account = await self._account_view()
+        self._say(
+            symbol=symbol,
+            timeframe=self.settings.timeframe,
+            signal="NO_TRADE",
+            signal_reason=reason,
+            trade_action="NO_TRADE",
+            **account,
+        )
+        await self._record_excel_skip(symbol, reason)
 
     async def _review_same_candle(
         self,
@@ -418,7 +615,7 @@ class SignalEngine:
             reason = "same closed candle, entry already checked"
         else:
             reason = signal.reason
-        log_action(
+        self._say(
             symbol=symbol,
             timeframe=self.settings.timeframe,
             signal=SignalType.NO_TRADE.value,
@@ -484,10 +681,11 @@ class SignalEngine:
             if self.terminal is None:
                 raise RiskLimitError("MT5 terminal is not connected.")
             contract = await asyncio.to_thread(self.terminal.contract, signal.symbol)
+            lot_entry = _lot_entry(signal, price)
             sized = calculate_lot(
                 balance=balance,
                 risk_pct=self.settings.risk_per_trade_pct,
-                entry=float(signal.price or price),
+                entry=lot_entry,
                 stop_loss=signal.stop_loss,
                 direction=signal.signal.value,
                 contract=contract,
@@ -497,7 +695,7 @@ class SignalEngine:
             self.risk.assert_can_open(sized.quantity)
         except (RiskLimitError, Exception) as exc:
             log.error("size_or_risk_blocked", error=str(exc), signal_id=signal.signal_id)
-            log_action(
+            self._say(
                 symbol=signal.symbol,
                 signal=signal.signal.value,
                 signal_reason=signal.reason,
@@ -516,7 +714,7 @@ class SignalEngine:
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
             signal_id=signal.signal_id,
-            expected_price=float(signal.price or price),
+            expected_price=lot_entry,
         )
         if self.settings.dry_run:
             self._remember_anchor(signal, f"DRY-{signal.signal_id}")
@@ -525,7 +723,7 @@ class SignalEngine:
             await self._record_excel_open(
                 signal, price, sized.quantity, balance, ticket=f"DRY-{signal.signal_id}"
             )
-            log_action(
+            self._say(
                 symbol=signal.symbol,
                 timeframe=self.settings.timeframe,
                 signal=signal.signal.value,
@@ -550,7 +748,7 @@ class SignalEngine:
                 "open_trades": len(self._seen_pnl),
                 "floating_pnl": sum(self._seen_pnl.values()),
             }
-        log_action(
+        self._say(
             symbol=signal.symbol,
             timeframe=self.settings.timeframe,
             signal=signal.signal.value,
@@ -600,16 +798,22 @@ class SignalEngine:
         extra = signal.extra
         buy = signal.signal is SignalType.BUY
         setup = "yellow" if buy or extra.get("yellow_low") else "blue"
+        setup = with_clock(setup, extra.get("setup_clock"))
         low = extra.get("yellow_low") or extra.get("blue_low") or ""
         high = extra.get("yellow_high") or extra.get("blue_high") or ""
         sweep = extra.get("sweep_low") if buy else extra.get("sweep_high")
+        sweep = with_clock(sweep, extra.get("sweep_clock")) if sweep else ""
+        breakout = extra.get("breakout_close")
+        if breakout is None:
+            breakout = signal.price if signal.price is not None else price
+        breakout = with_clock(breakout, extra.get("breakout_clock"))
         extreme = _sizing_extreme(signal)
         points = ""
         if extreme is not None and self.terminal is not None:
             try:
                 contract = await asyncio.to_thread(self.terminal.contract, signal.symbol)
                 if contract.tick_size > 0:
-                    points = round(abs(float(price) - extreme) / contract.tick_size, 1)
+                    points = round(abs(_lot_entry(signal, price) - extreme) / contract.tick_size, 1)
             except Exception as exc:  # noqa: BLE001
                 log.warning("trade_excel_points_unavailable", error=str(exc))
         risk_money = round(balance * (self.settings.risk_per_trade_pct / 100.0), 2)
@@ -623,8 +827,8 @@ class SignalEngine:
             "Setup": setup,
             "Setup low": low,
             "Setup high": high,
-            "Sweep price": sweep or "",
-            "Breakout price": signal.price if signal.price is not None else price,
+            "Sweep price": sweep,
+            "Breakout price": breakout,
             "Entry type": entry_type,
             "Entry price": price,
             "Stop": signal.stop_loss,
@@ -636,6 +840,26 @@ class SignalEngine:
             "Lot": quantity,
             "Ticket": ticket,
             "Mode": mode,
+        }
+        try:
+            await asyncio.to_thread(self.journal.record_open, row)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("trade_excel_open_failed", error=str(exc))
+
+    async def _record_excel_skip(self, symbol: str, reason: str) -> None:
+        now = time.monotonic()
+        last_reason, last_when = self._last_skip
+        if reason == last_reason and now - last_when < 60:
+            return
+        self._last_skip = (reason, now)
+        row = {
+            "Entry time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "Symbol": symbol,
+            "Timeframe": self.settings.timeframe,
+            "Buy or sell": "SKIP",
+            "Setup": reason,
+            "Entry type": "not traded",
+            "Mode": "DRY RUN" if self.settings.dry_run else self.settings.trading_mode.value,
         }
         try:
             await asyncio.to_thread(self.journal.record_open, row)

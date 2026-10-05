@@ -1,4 +1,10 @@
-from trading_bot.trading.trade_excel import TradeExcel
+from trading_bot.trading.trade_excel import TradeExcel, with_clock
+
+
+def test_a_price_keeps_its_chart_time() -> None:
+    assert with_clock(4151.561, "07:21") == "4151.561 07:21"
+    assert with_clock("yellow", "07:20") == "yellow 07:20"
+    assert with_clock("4154.416", "") == "4154.416"
 
 
 def test_trade_excel_saves_open_and_close(tmp_path) -> None:  # type: ignore[no-untyped-def]

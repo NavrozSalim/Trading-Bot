@@ -33,9 +33,26 @@ def test_zoom_moves_toward_about_45_candles_and_14_points() -> None:
 
     assert zoom_action(97, 32) == "time-in"
     assert zoom_action(30, 14) == "time-out"
-    assert zoom_action(45, 32) == "price-in"
-    assert zoom_action(45, 8) == "price-out"
+    assert zoom_action(54, 19) is None
+    assert zoom_action(45, 32) is None
+    assert zoom_action(45, 8) is None
     assert zoom_action(45, 14) is None
+
+
+def test_broken_axis_numbers_snap_back_onto_the_gold_scale() -> None:
+    from trading_bot.market.chart_prices import _repair_axis
+
+    labels = _repair_axis(
+        [
+            (10, "4,188.8"),
+            (30, "4,186.8"),
+            (50, "4,18.8"),
+            (90, "4,180.08"),
+            (110, "4,1.8"),
+        ]
+    )
+    prices = sorted(price for _y, price in labels)
+    assert prices == [4178.0, 4180.0, 4184.0, 4186.0, 4188.0]
 
 
 def test_price_text_keeps_the_comma_and_the_decimals() -> None:
@@ -120,7 +137,10 @@ def test_price_scale_click_lands_on_the_quiet_numbers() -> None:
 def test_two_prices_do_not_set_the_scale() -> None:
     image = _chart([("4,299.000", 28), ("1,968.000", 108)])
     market = market_from_bgr(image, _vision(), datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc))
-    assert market is None
+    assert market is not None
+    assert market.scale is None
+    assert market.price_span is None
+    assert any(candle.close != candle.open for candle in market.closed)
 
 
 def test_a_steep_scale_is_rejected() -> None:
@@ -128,7 +148,8 @@ def test_a_steep_scale_is_rejected() -> None:
         [("5,000.000", 28), ("4,000.000", 68), ("3,000.000", 108), ("2,000.000", 148)]
     )
     market = market_from_bgr(image, _vision(), datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc))
-    assert market is None
+    assert market is not None
+    assert market.scale is None
 
 
 def test_a_clock_number_does_not_move_the_gold_price() -> None:

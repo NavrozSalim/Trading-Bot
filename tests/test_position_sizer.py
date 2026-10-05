@@ -64,6 +64,22 @@ def test_sell_lot_is_risk_divided_by_points_from_high_to_breakdown() -> None:
     assert sized.risk_money == 10
 
 
+def test_six_hundred_points_on_a_500_account_rounds_to_two_cents() -> None:
+    """$10 risk / 600 points is 0.0167, and the nearest lot step is 0.02."""
+    sized = calculate_lot(
+        balance=500,
+        risk_pct=2.0,
+        entry=4500,
+        stop_loss=4494.2,
+        direction="BUY",
+        contract=GOLD,
+        max_position_size=1.0,
+        sizing_extreme=4494,
+    )
+    assert sized.quantity == 0.02
+    assert sized.risk_money == 10
+
+
 def test_cap_applies() -> None:
     sized = calculate_lot(
         balance=49708.88,

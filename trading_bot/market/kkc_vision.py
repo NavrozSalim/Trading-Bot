@@ -374,7 +374,6 @@ class ScreenColorReader:
     def __init__(self, path: Path = CONFIG_PATH) -> None:
         self.path = path
         self.vision = load_vision(path)
-        self._market_memory = ColorMemory()
         self._scale: tuple[float, float] | None = None
         self._candle_count = 0
         self._last_fit = 0.0
@@ -429,22 +428,12 @@ class ScreenColorReader:
         if market is None:
             return None
         if market.scale is not None:
-            if self._scale is not None and abs(_scale_mid(market.scale, image.shape[0]) - _scale_mid(self._scale, image.shape[0])) > 30:
-                self._market_memory = ColorMemory()
             self._scale = market.scale
-        if self._candle_count and abs(len(market.closed) - self._candle_count) > 8:
-            self._market_memory = ColorMemory()
         self._candle_count = len(market.closed)
-        held = self._market_memory.apply(
-            [str(candle.timestamp) for candle in market.closed],
-            market.colors,
-        )
-        if held is None:
-            return None
         return ChartMarket(
             closed=market.closed,
             forming=market.forming,
-            colors=held,
+            colors=list(market.colors),
             fresh_colors=list(market.colors),
             scale=market.scale,
             clipped=market.clipped,
@@ -465,7 +454,6 @@ class ScreenColorReader:
             return False
         self._last_zoom = (action, now)
         self._scale = None
-        self._market_memory = ColorMemory()
         self._candle_count = 0
         notches = 2 if action.endswith("in") else -2
         await asyncio.to_thread(_scroll_at, point[0], point[1], notches)
@@ -473,16 +461,13 @@ class ScreenColorReader:
         return True
 
     async def _zoom_point(self, action: str) -> tuple[int, int] | None:
-        if action.startswith("time"):
-            return (
-                self.vision.x + int(self.vision.width * 0.35),
-                self.vision.y + int(self.vision.height * 0.45),
-            )
         try:
             image = await asyncio.to_thread(_grab_roi, self.vision)
         except Exception as exc:  # noqa: BLE001
             log.warning("kkc_capture_failed", error=str(exc))
             return None
+        if action.startswith("time"):
+            return _newest_candle_point(image, self.vision)
         return _price_scale_point(image, self.vision)
 
     async def fit_price_scale(self) -> bool:
@@ -506,9 +491,22 @@ class ScreenColorReader:
         return True
 
 
-def _scale_mid(scale: tuple[float, float], height: int) -> float:
-    slope, intercept = scale
-    return float(intercept + slope * (height / 2.0))
+def _newest_candle_point(image: np.ndarray, vision: ChartVision) -> tuple[int, int] | None:
+    """Screen point over the forming candle. TradingView zooms around the mouse,
+    so a zoom anywhere else scrolls the newest candle away."""
+    import cv2
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    height = hsv.shape[0]
+    top, bottom = int(height * 0.08), int(height * 0.92)
+    if bottom <= top:
+        return None
+    ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 3
+    runs = _candle_runs(ink)
+    if len(runs) < 2:
+        return None
+    start, end = runs[-1]
+    return vision.x + (start + end) // 2, vision.y + int(height * 0.45)
 
 
 def _price_scale_point(image: np.ndarray, vision: ChartVision) -> tuple[int, int] | None:

@@ -118,8 +118,8 @@ def _plain_reason(reason: str | None, error: str | None) -> str:
         "not_enough_candles": "not enough candles yet",
         "yellow_low_sweep_two_green_breakout": "buy setup: low sweep, then two green candles",
         "blue_high_sweep_two_red_breakout": "sell setup: high sweep, then two red candles",
-        "yellow_target_reached_without_retest": "price already reached the buy target without a retest",
-        "blue_target_reached_without_retest": "price already reached the sell target without a retest",
+        "yellow_target_reached_without_retest": "price reached 1:1.8 before the retest — setup cancelled",
+        "blue_target_reached_without_retest": "price reached 1:1.8 before the retest — setup cancelled",
         "await_yellow_retest": "SETUP COMPLETE — WAITING FOR RETEST",
         "await_blue_retest": "SETUP COMPLETE — WAITING FOR RETEST",
         "retest_touch": "RETEST DETECTED — ENTRY CONFIRMED",
@@ -130,6 +130,7 @@ def _plain_reason(reason: str | None, error: str | None) -> str:
 
 def format_action_text(
     *,
+    chart_read: str | None = None,
     symbol: str | None = None,
     signal: str | None = None,
     signal_reason: str | None = None,
@@ -158,7 +159,12 @@ def format_action_text(
     else:
         headline = f"{clock}  {symbol or '-'}  {side}"
 
-    lines = [headline, f"  Why: {_plain_reason(signal_reason, error)}"]
+    lines = [headline]
+    if chart_read:
+        for index, row in enumerate(chart_read.split("\n")):
+            label = "Read: " if index == 0 else "      "
+            lines.append(f"  {label}{row}")
+    lines.append(f"  Why: {_plain_reason(signal_reason, error)}")
     if current_price is not None:
         lines.append(f"  Price: {current_price}")
     if position_size is not None:
@@ -179,6 +185,7 @@ def format_action_text(
 
 def log_action(
     *,
+    chart_read: str | None = None,
     symbol: str | None = None,
     timeframe: str | None = None,
     signal: str | None = None,
@@ -220,6 +227,7 @@ def log_action(
     }
     logger.info("bot_action", **{k: v for k, v in payload.items() if v is not None})
     text = format_action_text(
+        chart_read=chart_read,
         symbol=symbol,
         signal=signal,
         signal_reason=signal_reason,

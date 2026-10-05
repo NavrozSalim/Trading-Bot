@@ -76,7 +76,7 @@ class Settings(BaseSettings):
 
     execution_backend: Literal["MT5", "NULL"] = "MT5"
     open_tradingview: bool = True
-    candle_poll_seconds: float = Field(default=10.0, ge=0.5)
+    candle_poll_seconds: float = Field(default=3.0, ge=0.5)
 
     mt5_terminal_path: str = ""
     mt5_login: int = 0

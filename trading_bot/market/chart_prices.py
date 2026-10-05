@@ -1,8 +1,9 @@
-"""Read each candle's high, low, open, and close from the TradingView chart.
+"""Read the candles on the TradingView chart: position, red or green, and paint.
 
 The price numbers on the right of the chart turn a pixel into a price.
-The blue bottom is the bottom of that blue candle's wick. MetaTrader
-candles are not used for this.
+When they cannot be read, the candles are still returned with pixel
+heights so their reds and greens can be matched against MetaTrader.
+Trade prices always come from MetaTrader.
 """
 
 from __future__ import annotations
@@ -64,9 +65,8 @@ def market_from_bgr(
         _fail("not enough candles on the chart")
         return None
     scale = _choose_scale(image, runs[-1][1], previous_scale)
-    if scale is None:
-        return None
-    slope, intercept = scale
+    priced = scale is not None
+    slope, intercept = scale if scale is not None else (-1.0, float(hsv.shape[0]))
     clipped = _wicks_touch_edge(hsv, runs)
     pitch = _candle_pitch(runs)
     forming_center = (runs[-1][0] + runs[-1][1]) / 2.0
@@ -112,19 +112,20 @@ def market_from_bgr(
     log.info(
         "chart_prices_read",
         candles=len(closed),
-        forming_close=forming.close,
+        forming_close=forming.close if priced else None,
         blue=colors.count("blue"),
         yellow=colors.count("yellow"),
         clipped=clipped,
+        priced=priced,
     )
     return ChartMarket(
         closed=closed,
         forming=forming,
         colors=colors,
         fresh_colors=list(colors),
-        scale=(slope, intercept),
+        scale=(slope, intercept) if priced else None,
         clipped=clipped,
-        price_span=abs(slope) * float(height),
+        price_span=abs(slope) * float(height) if priced else None,
     )
 
 
@@ -142,17 +143,17 @@ def candle_run_count(image: np.ndarray) -> int:
 
 
 def zoom_action(candle_count: int, price_span: float | None) -> str | None:
-    """Zoom toward the readable chart: about 40 to 55 candles and 12 to 18 points."""
+    """Zoom the time scale until about 40 to 55 candles are on screen.
+
+    A price-scale zoom is not used. Gold's visible range sits near 18 points,
+    and zooming that scale in pushes a wick into the edge. The next check then
+    resets the scale, and the two actions repeat.
+    """
+    del price_span
     if candle_count > 55:
         return "time-in"
     if 0 < candle_count < 40:
         return "time-out"
-    if price_span is None:
-        return None
-    if price_span > 18:
-        return "price-in"
-    if price_span < 12:
-        return "price-out"
     return None
 
 
@@ -374,22 +375,78 @@ def _price_labels(image: np.ndarray, candle_right: int) -> list[tuple[float, flo
     mask = _text_mask(strip)
     if mask is None or not np.any(mask):
         return []
-    labels: list[tuple[float, float]] = []
-    seen: list[str] = []
+    seen: list[tuple[float, str]] = []
     for top, bottom in _text_lines(mask):
         center = (top + bottom - 1) / 2.0
         if center > height * 0.88:
             continue
         line = mask[top:bottom]
-        text = _read_line(line)
-        seen.append(text)
-        price = _parse_price(text)
-        if price is None:
-            continue
-        labels.append((center, price))
+        seen.append((center, _read_line(line)))
+    labels = _repair_axis(seen)
     if len(labels) < _MIN_LABELS and seen:
-        log.info("chart_axis_text", lines=seen)
+        log.info("chart_axis_text", lines=[text for _y, text in seen])
     return labels
+
+
+def _junk_fraction(frac: str) -> bool:
+    """Trailing zeros on 4,188.000 are often read as 8. That is not a real decimal."""
+    return bool(frac) and set(frac) <= set("08")
+
+
+def _axis_parts(text: str) -> tuple[str, str] | None:
+    cleaned = "".join(ch for ch in text if ch.isdigit() or ch in ",.")
+    if not cleaned or not cleaned[0].isdigit():
+        return None
+    parts = [part for part in re.split(r"[,.]", cleaned) if part]
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    if len(parts) == 1:
+        return parts[0], ""
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    if len(parts) == 3 and len(parts[1]) == 3:
+        return parts[0] + parts[1], parts[2]
+    if len(parts) == 3 and _junk_fraction(parts[2]):
+        return parts[0] + parts[1], parts[2]
+    return None
+
+
+def _repair_axis(lines: list[tuple[float, str]]) -> list[tuple[float, float]]:
+    """Snap 4,188.8 and 4,18.8 back onto 4,188 and 4,184. Keep a real decimal such as 4,122.325."""
+    exact: list[tuple[float, float]] = []
+    anchors: list[tuple[float, float, str]] = []
+    weak: list[tuple[float, str]] = []
+    for y, text in lines:
+        split = _axis_parts(text)
+        if split is None:
+            continue
+        whole, frac = split
+        if frac and not _junk_fraction(frac):
+            price = _parse_price(text)
+            if price is not None:
+                exact.append((y, price))
+            continue
+        if len(whole) >= 4:
+            anchors.append((y, float(whole), whole))
+        elif len(whole) >= 2:
+            weak.append((y, whole))
+    guides = _clustered_labels([(y, price) for y, price, _whole in anchors] + exact)
+    if len(guides) < 2:
+        return guides
+    slope, intercept, _resid = _line(guides)
+    repaired: list[tuple[float, float]] = list(exact)
+    for y, price, _whole in anchors:
+        predicted = intercept + slope * y
+        rounded = float(round(predicted))
+        chosen = rounded if abs(price - rounded) <= 1.25 else price
+        if abs(chosen - predicted) <= 1.5:
+            repaired.append((y, chosen))
+    for y, whole in weak:
+        predicted = intercept + slope * y
+        rounded = float(round(predicted))
+        if abs(predicted - rounded) <= 0.75 and str(int(rounded)).startswith(whole):
+            repaired.append((y, rounded))
+    return repaired
 
 
 def _text_mask(strip: np.ndarray) -> np.ndarray | None:

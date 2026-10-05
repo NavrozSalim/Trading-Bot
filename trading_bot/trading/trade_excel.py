@@ -43,6 +43,13 @@ HEADERS = [
 _TICKET_COL = HEADERS.index("Ticket") + 1
 
 
+def with_clock(value: object, clock: object) -> str:
+    """Price or name plus the chart time, such as '4151.561 07:21'."""
+    text = "" if value is None else str(value)
+    when = "" if clock is None else str(clock)
+    return f"{text} {when}".strip()
+
+
 def _exit_label(exit_price: float | None, stop: object, target: object, fallback: str) -> str:
     if exit_price is None:
         return fallback
