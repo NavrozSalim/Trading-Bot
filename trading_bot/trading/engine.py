@@ -41,6 +41,15 @@ _MATCH_MIN_VOTES = 8
 _MATCH_MIN_AGREE = 0.75
 
 
+def invalid_setup_reason(stage_log: str) -> str:
+    """The specific invalid line, such as a red that missed the yellow."""
+    for part in stage_log.split(" | "):
+        piece = part.strip()
+        if piece.startswith("SETUP INVALID"):
+            return piece
+    return ""
+
+
 def price_on_retest(bid: float, ask: float, level: float, *, buy: bool) -> bool:
     """True when the market-order price is on the retest, within the spread.
 
@@ -136,6 +145,7 @@ class SignalEngine:
         self._startup_bar = None
         self._chart_read = ""
         self._last_skip = ("", 0.0)
+        self._invalid_written: set[str] = set()
         self.color_reader = None
         self._color_memory = ColorMemory()
         self.journal = TradeExcel(settings.logs_dir.parent / "data" / "trades.xlsx")
@@ -402,6 +412,7 @@ class SignalEngine:
             candles, symbol=symbol, timeframe=self.settings.timeframe, colors=colors
         )
         self.health.update(latest_signal=signal.signal.value)
+        await self._record_excel_invalid(symbol, signal)
         await self.database.save_signal(signal)
         await self.database.log_event("signal", f"{signal.signal.value} {signal.reason}")
         account = await self._account_view()
@@ -669,6 +680,7 @@ class SignalEngine:
             candles, symbol=symbol, timeframe=self.settings.timeframe, colors=colors
         )
         self.health.update(latest_signal=signal.signal.value)
+        await self._record_excel_invalid(symbol, signal)
         account = await self._account_view()
         if signal.extra.get("await_retest") == "1" and self._expired_setups.contains(signal):
             reason = "this yellow or blue already finished at the stop or target"
@@ -903,6 +915,44 @@ class SignalEngine:
             "Lot": quantity,
             "Ticket": ticket,
             "Mode": mode,
+        }
+        try:
+            await asyncio.to_thread(self.journal.record_open, row)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("trade_excel_open_failed", error=str(exc))
+
+    async def _record_excel_invalid(self, symbol: str, signal: Signal) -> None:
+        """One row for a cancelled setup, with the reason that cancelled it."""
+        reason = invalid_setup_reason(str(signal.extra.get("stage_log", "")))
+        if not reason:
+            return
+        anchor = str(signal.extra.get("anchor_time", "")) or reason
+        if anchor in self._invalid_written:
+            return
+        self._invalid_written.add(anchor)
+        extra = signal.extra
+        low = extra.get("yellow_low") or extra.get("blue_low") or ""
+        high = extra.get("yellow_high") or extra.get("blue_high") or ""
+        sweep = extra.get("sweep_low") or extra.get("sweep_high") or ""
+        sweep = with_clock(sweep, extra.get("sweep_clock")) if sweep else ""
+        breakout = extra.get("breakout_close") or ""
+        breakout = with_clock(breakout, extra.get("breakout_clock")) if breakout else ""
+        stop = signal.stop_loss if signal.stop_loss else ""
+        target = signal.take_profit if signal.take_profit else ""
+        row = {
+            "Entry time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "Symbol": symbol,
+            "Timeframe": signal.timeframe or self.settings.timeframe,
+            "Buy or sell": "INVALID",
+            "Setup": reason,
+            "Setup low": low,
+            "Setup high": high,
+            "Sweep price": sweep,
+            "Breakout price": breakout,
+            "Entry type": "not traded",
+            "Stop": stop,
+            "Target": target,
+            "Mode": "DRY RUN" if self.settings.dry_run else self.settings.trading_mode.value,
         }
         try:
             await asyncio.to_thread(self.journal.record_open, row)

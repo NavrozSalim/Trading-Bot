@@ -13,7 +13,7 @@ from trading_bot.safety.duplicate_protection import DuplicateProtection
 from trading_bot.safety.kill_switch import KillSwitch
 from trading_bot.strategy.signals import Signal, SignalType
 from trading_bot.strategy.strategy import SweepBreakoutStrategy
-from trading_bot.trading.engine import SignalEngine, price_on_retest
+from trading_bot.trading.engine import SignalEngine, invalid_setup_reason, price_on_retest
 from trading_bot.trading.executor import NullExecutor, Position
 from trading_bot.trading.position_manager import PositionManager
 from trading_bot.trading.position_sizer import SymbolContract
@@ -826,3 +826,47 @@ async def test_an_unreadable_chart_is_written_to_excel(settings, capsys) -> None
 
     sheet = openpyxl.load_workbook(book).active
     assert sheet["E2"].value == "SKIP"
+
+
+def test_invalid_setup_reason_keeps_the_specific_line() -> None:
+    stage = (
+        "YELLOW DETECTED — BUY SETUP 14:45 | "
+        "2 RED CANDLES — REQUIREMENT COMPLETE 14:43, 14:44 | "
+        "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
+    )
+    assert invalid_setup_reason(stage) == "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
+    assert invalid_setup_reason("YELLOW DETECTED — BUY SETUP 14:45") == ""
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_setup_is_written_to_excel_with_its_reason(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    engine, db = _engine(settings, BlankChart())
+    await db.start()
+    signal = Signal(
+        signal=SignalType.NO_TRADE,
+        reason="yellow_on_chart_no_breakout",
+        symbol="XAUUSD",
+        timeframe="1M",
+        candle_timestamp="2026-10-06T09:56",
+        extra={
+            "anchor_time": "2026-10-06T09:45",
+            "stage_log": (
+                "YELLOW DETECTED — BUY SETUP 14:45 | "
+                "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
+            ),
+            "yellow_low": "4140.1",
+            "yellow_high": "4142.4",
+        },
+    )
+    await engine._record_excel_invalid("XAUUSD", signal)
+    await engine._record_excel_invalid("XAUUSD", signal)
+    await db.close()
+    book = settings.logs_dir.parent / "data" / "trades.xlsx"
+    import openpyxl
+
+    sheet = openpyxl.load_workbook(book).active
+    assert sheet.max_row == 2
+    assert sheet["E2"].value == "INVALID"
+    assert sheet["F2"].value == "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
