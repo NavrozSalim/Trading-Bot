@@ -28,6 +28,9 @@ from trading_bot.monitoring.screenshots import ScreenshotManager
 
 log = get_logger("trading_bot.login")
 
+# TradingView sets these only after a real sign-in. Names only; values are never logged.
+_TRADINGVIEW_SESSION_COOKIES = frozenset({"sessionid", "sessionid_sign"})
+
 
 class AuthStatus(str, Enum):
     LOGGED_IN = "logged_in"
@@ -61,6 +64,11 @@ class LoginManager:
         if await self._named_visible(page, "login_error"):
             return AuthStatus.LOGIN_FAILED
         if await self._named_visible(page, "session_expired"):
+            return AuthStatus.LOGGED_OUT
+        session = await self._tradingview_session(page)
+        if session is True:
+            return AuthStatus.LOGGED_IN
+        if session is False:
             return AuthStatus.LOGGED_OUT
         if await self._is_logged_in(page):
             return AuthStatus.LOGGED_IN
@@ -122,11 +130,20 @@ class LoginManager:
     async def pause_for_human(self, page: Page, reason: AuthStatus) -> AuthStatus:
         await self.screenshots.capture(page, f"human_required_{reason.value}")
         timeout = self.settings.human_action_timeout_seconds
-        message = (
-            f"BOT PAUSED: {reason.value.replace('_', ' ')} requires manual action in the browser. "
-            "Complete CAPTCHA / 2FA / login yourself. The bot will not bypass security. "
-            f"Waiting up to {timeout} seconds for a logged-in session..."
-        )
+        if reason is AuthStatus.LOGGED_OUT and "tradingview.com" in (page.url or "").lower():
+            message = (
+                "TradingView is signed out in this Chrome window. "
+                "Windows Chrome does not keep the website login when this profile is copied, "
+                "so sign in once here, or stop the bot and run "
+                "python main.py --tradingview-login. "
+                f"Waiting up to {timeout} seconds..."
+            )
+        else:
+            message = (
+                f"BOT PAUSED: {reason.value.replace('_', ' ')} requires manual action in the browser. "
+                "Complete CAPTCHA / 2FA / login yourself. The bot will not bypass security. "
+                f"Waiting up to {timeout} seconds for a logged-in session..."
+            )
         log.warning("human_action_required", reason=reason.value, timeout_seconds=timeout)
         print("\n" + "=" * 72)
         print(message)
@@ -136,6 +153,12 @@ class LoginManager:
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             await asyncio.sleep(self.settings.login_poll_interval_seconds)
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                raise HumanActionRequired(
+                    "The Chrome window was closed before sign-in finished. "
+                    "Run python main.py --tradingview-login to sign in once."
+                )
             status = await self.detect_status(page)
             if status is AuthStatus.LOGGED_IN:
                 log.info("human_action_completed_login")
@@ -181,6 +204,27 @@ class LoginManager:
         if url not in (page.url or ""):
             log.info("opening_login_page", url=url)
             await page.goto(url, wait_until="domcontentloaded")
+
+    async def _tradingview_session(self, page: Page) -> bool | None:
+        """Whether this TradingView page has a signed-in cookie.
+
+        None when the page is not TradingView or cookies cannot be read.
+        """
+        url = (getattr(page, "url", "") or "").lower()
+        if "tradingview.com" not in url:
+            return None
+        context = getattr(page, "context", None)
+        if context is None or not hasattr(context, "cookies"):
+            return None
+        try:
+            cookies = await context.cookies("https://www.tradingview.com")
+        except Exception:  # noqa: BLE001
+            log.warning("tradingview_cookie_check_failed")
+            return None
+        names = {str(item.get("name", "")) for item in cookies if isinstance(item, dict)}
+        signed_in = bool(names & _TRADINGVIEW_SESSION_COOKIES)
+        log.info("tradingview_session", signed_in=signed_in)
+        return signed_in
 
     async def _is_logged_in(self, page: Page) -> bool:
         if await self._named_visible(page, "logged_in_indicator"):

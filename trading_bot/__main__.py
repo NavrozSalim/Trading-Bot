@@ -24,6 +24,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Copy Chrome Profile 52 into ./browser_profile so debugging can attach",
     )
+    group.add_argument(
+        "--tradingview-login",
+        action="store_true",
+        help="Open the bot's Chrome profile so you can sign in to TradingView once",
+    )
     group.add_argument("--test-selectors", action="store_true", help="Probe BUY/SELL/qty/SL/TP controls without trading")
     group.add_argument(
         "--run",
@@ -60,8 +65,62 @@ def _copy_chrome_profile(settings: Settings) -> int:
         print(exc)
         return 1
     print(f"Copied to {dest}")
-    print("Next: python main.py --setup")
+    print("Windows Chrome drops website logins from a copied profile.")
+    print("Next: python main.py --tradingview-login")
     return 0
+
+
+async def _tradingview_login(settings: Settings) -> int:
+    from trading_bot.bot import build_context
+    from trading_bot.browser.chrome_profile import (
+        assert_chrome_unlocked,
+        assert_named_profile_exists,
+        find_chrome_executable,
+        spawn_chrome_for_login,
+    )
+    from trading_bot.browser.login import AuthStatus
+
+    name = settings.chrome_profile_directory.strip() or "Default"
+    try:
+        assert_chrome_unlocked(require_closed=True)
+        assert_named_profile_exists(settings.browser_profile_dir, name)
+        chrome_path = find_chrome_executable(settings.chrome_path)
+    except ConfigurationError as exc:
+        print(exc)
+        return 1
+
+    print("Chrome is opening TradingView with the bot's profile.")
+    print("1. Sign in to TradingView in that window (Google sign-in works here).")
+    print("2. When the chart shows your account, close that Chrome window.")
+    proc = spawn_chrome_for_login(
+        chrome_path=chrome_path,
+        user_data_dir=settings.browser_profile_dir,
+        profile_directory=name,
+        url="https://www.tradingview.com/accounts/signin/",
+    )
+    await asyncio.to_thread(proc.wait)
+    while await asyncio.to_thread(_chrome_running):
+        await asyncio.sleep(1)
+
+    print("Chrome closed. Checking that the login was saved...")
+    ctx = build_context(settings)
+    try:
+        page = await ctx.browser.start()
+        await ctx.navigator.open_broker(page)
+        status = await ctx.login.detect_status(page)
+    finally:
+        await ctx.browser.close()
+    if status is AuthStatus.LOGGED_IN:
+        print("TradingView login saved. Start the bot with: python main.py --run")
+        return 0
+    print("TradingView is still signed out. Run python main.py --tradingview-login again.")
+    return 1
+
+
+def _chrome_running() -> bool:
+    from trading_bot.browser.chrome_profile import chrome_process_running
+
+    return chrome_process_running()
 
 
 async def _run_test_selectors(settings: Settings) -> None:
@@ -118,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.copy_chrome_profile:
         return _copy_chrome_profile(settings)
+    if args.tradingview_login:
+        return asyncio.run(_tradingview_login(settings))
     if args.test_selectors:
         asyncio.run(_run_test_selectors(settings))
         return 0
@@ -131,7 +192,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return 0
 
-    print("Specify one of: --setup  --copy-chrome-profile  --test-selectors  --run  --dashboard")
+    print(
+        "Specify one of: --setup  --copy-chrome-profile  --tradingview-login  "
+        "--test-selectors  --run  --dashboard"
+    )
     print("See README.md for run instructions. Keep DRY_RUN=true until you want demo fills.")
     return 1
 

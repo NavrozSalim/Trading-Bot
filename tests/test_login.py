@@ -83,7 +83,34 @@ async def test_saved_session_skips_username_password(settings) -> None:  # type:
     manager = LoginManager(
         settings, registry, ScreenshotManager(settings.screenshots_dir)
     )
-    page = FakePage(url="https://www.tradingview.com/chart/")
+    page = FakePage(url="https://www.tradingview.com/chart/", cookie_names={"sessionid"})
     status = await manager.ensure_logged_in(page)
     assert status is AuthStatus.LOGGED_IN
     assert page.goto_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tradingview_without_session_cookie_waits(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.broker_username = ""
+    settings.broker_password = type(settings.broker_password)("")
+    settings.human_action_timeout_seconds = 1
+    settings.login_poll_interval_seconds = 0.2
+    registry = SelectorRegistry()
+    manager = LoginManager(
+        settings, registry, ScreenshotManager(settings.screenshots_dir)
+    )
+    page = FakePage(
+        url="https://www.tradingview.com/chart/?symbol=XAUUSD&interval=1",
+        cookie_names={"cookiePrivacyPreferenceBannerProduction"},
+    )
+    with pytest.raises(HumanActionRequired):
+        await manager.ensure_logged_in(page)
+
+
+@pytest.mark.asyncio
+async def test_pause_stops_when_window_closed(login_manager: LoginManager, settings) -> None:  # type: ignore[no-untyped-def]
+    settings.login_poll_interval_seconds = 0.5
+    page = FakePage()
+    page.closed = True
+    with pytest.raises(HumanActionRequired, match="closed"):
+        await login_manager.pause_for_human(page, AuthStatus.LOGGED_OUT)

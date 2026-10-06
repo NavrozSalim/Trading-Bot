@@ -17,3 +17,8 @@ def test_parse_test_selectors_flag() -> None:
 def test_parse_copy_chrome_profile_flag() -> None:
     args = parse_args(["--copy-chrome-profile"])
     assert args.copy_chrome_profile is True
+
+
+def test_parse_tradingview_login_flag() -> None:
+    args = parse_args(["--tradingview-login"])
+    assert args.tradingview_login is True

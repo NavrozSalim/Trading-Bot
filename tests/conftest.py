@@ -74,11 +74,29 @@ class FakeLocator:
         return None
 
 
+class FakeContext:
+    def __init__(self, cookie_names: set[str] | None = None) -> None:
+        self._names = cookie_names or set()
+
+    async def cookies(self, _url: str = "") -> list[dict[str, str]]:
+        return [{"name": name, "value": "present"} for name in self._names]
+
+
 class FakePage:
-    def __init__(self, locators: dict[str, FakeLocator] | None = None, url: str = "https://example-broker.invalid/trade") -> None:
+    def __init__(
+        self,
+        locators: dict[str, FakeLocator] | None = None,
+        url: str = "https://example-broker.invalid/trade",
+        cookie_names: set[str] | None = None,
+    ) -> None:
         self._locators = locators or {}
         self.url = url
         self.goto_calls: list[str] = []
+        self.context = FakeContext(cookie_names) if cookie_names is not None else None
+        self.closed = False
+
+    def is_closed(self) -> bool:
+        return self.closed
 
     def locator(self, selector: str) -> FakeLocator:
         return self._locators.get(selector, FakeLocator(visible=False, count=0))

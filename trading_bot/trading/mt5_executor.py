@@ -16,17 +16,6 @@ log = get_logger("trading_bot.mt5_executor")
 MT5_COMMENT_MAX = 31
 
 
-def stops_on_fill(stop: float, target: float, chart_price: float, fill: float) -> tuple[float, float]:
-    """Keep the chart's stop and target distances, measured from the MT5 fill."""
-    if chart_price <= 0 or fill <= 0:
-        return stop, target
-    delta = fill - chart_price
-    return (
-        round(stop + delta, 3) if stop else stop,
-        round(target + delta, 3) if target else target,
-    )
-
-
 def mt5_order_comment(signal_id: str | None) -> str:
     """MT5 rejects comments with ':' and similar; max 31 chars."""
     raw = signal_id or "bot"
@@ -196,12 +185,6 @@ class Mt5Executor(TradingExecutor):
         api = self.terminal.api
         sl = float(order.stop_loss) if order.stop_loss is not None else 0.0
         tp = float(order.take_profit) if order.take_profit is not None else 0.0
-        sl, tp = stops_on_fill(
-            sl,
-            tp,
-            float(order.expected_price or 0),
-            float(position.entry_price or 0),
-        )
         request = {
             "action": api.TRADE_ACTION_SLTP,
             "symbol": position.symbol,

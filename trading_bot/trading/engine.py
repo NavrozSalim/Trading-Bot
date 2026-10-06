@@ -41,6 +41,18 @@ _MATCH_MIN_VOTES = 8
 _MATCH_MIN_AGREE = 0.75
 
 
+def price_on_retest(bid: float, ask: float, level: float, *, buy: bool) -> bool:
+    """True when the market-order price is on the retest, within the spread.
+
+    A buy pays the ask, so the ask must be on the yellow high. A sell hits the bid,
+    so the bid must be on the blue low.
+    """
+    if bid <= 0 or ask < bid or level <= 0:
+        return False
+    traded = ask if buy else bid
+    return abs(traded - level) <= (ask - bid) + 1e-9
+
+
 class _ExpiredSetups:
     """Yellow and blue candles that already closed at a stop or target."""
 
@@ -198,6 +210,23 @@ class SignalEngine:
         self._chart_read = "\n".join(rows)
 
     @staticmethod
+    def _clock_moved(shift_minutes: int) -> bool:
+        """A small clock slide. A chart scrolled well back from the live edge is not this."""
+        return shift_minutes != 0 and shift_minutes >= -5
+
+    def _held_colors(self, candles: list) -> list[str]:
+        """Colors already counted on a closed candle. This picture does not add one."""
+        return [self._color_memory.confirmed.get(str(candle.timestamp), "") for candle in candles]
+
+    def _clock_blocks_paint(self, shift_minutes: int) -> str:
+        way = "back" if shift_minutes < 0 else "forward"
+        return (
+            f"Clock moved {way} {abs(shift_minutes)} minutes. "
+            "Yellow and blue are counted when that 1-minute candle has closed on TradingView "
+            "and the picture time matches it."
+        )
+
+    @staticmethod
     def _chart_shift(chart_candles: list, history: list, candles: list):
         """Minutes that move the picture onto MT5's bars. None if the picture is not MT5's chart."""
         sided = sum(1 for candle in chart_candles if candle.close != candle.open)
@@ -234,6 +263,26 @@ class SignalEngine:
             return float(forming.high) >= float(target)
         return float(forming.low) <= float(target)
 
+    async def _quote(self, symbol: str) -> tuple[float, float] | None:
+        """Live MT5 bid and ask. Candle highs and lows are bid prices."""
+        if self.terminal is None or not hasattr(self.terminal, "tick"):
+            return None
+        try:
+            tick = await asyncio.to_thread(self.terminal.tick, symbol)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("retest_quote_unavailable", error=str(exc))
+            return None
+        if tick is None:
+            return None
+        try:
+            bid = float(tick.bid)
+            ask = float(tick.ask)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if bid <= 0 or ask < bid:
+            return None
+        return bid, ask
+
     async def poll_once(self) -> None:
         if self.terminal is None:
             log.warning("engine_skipped_no_mt5_terminal")
@@ -244,6 +293,7 @@ class SignalEngine:
         chart_colors: list[str] | None = None
         fresh_colors: list[str] | None = None
         shift_minutes = 0
+        paint_waits = False
         if self.color_reader is not None and hasattr(self.color_reader, "read_market"):
             market = await self.color_reader.read_market()
             candles_on_screen = market is not None and 40 <= len(market.closed) <= 55
@@ -281,13 +331,24 @@ class SignalEngine:
                 shift_minutes = int(shift.total_seconds() // 60)
                 if shift_minutes:
                     log.info("chart_times_shifted", minutes=shift_minutes)
-                chart_times = [candle.timestamp + shift for candle in market.closed]
-                bar_times = [candle.timestamp for candle in candles]
                 picture = market.fresh_colors if market.fresh_colors is not None else market.colors
-                fresh_colors = paint_by_time(chart_times, list(picture), bar_times)
-                chart_colors = self._color_memory.apply(
-                    [str(candle.timestamp) for candle in candles], fresh_colors
-                )
+                bar_times = [candle.timestamp for candle in candles]
+                if self._clock_moved(shift_minutes):
+                    fresh_colors = None
+                    chart_colors = self._held_colors(candles)
+                    paint_waits = True
+                else:
+                    closed = [
+                        (candle, color)
+                        for candle, color in zip(market.closed, list(picture))
+                        if candle.is_closed
+                    ]
+                    chart_times = [candle.timestamp + shift for candle, _color in closed]
+                    closed_colors = [color for _candle, color in closed]
+                    fresh_colors = paint_by_time(chart_times, closed_colors, bar_times)
+                    chart_colors = self._color_memory.apply(
+                        [str(candle.timestamp) for candle in candles], fresh_colors
+                    )
             price = float(forming.close) if forming is not None else float(candles[-1].close)
         else:
             candles = await asyncio.to_thread(
@@ -306,10 +367,12 @@ class SignalEngine:
         seen = list(fresh_colors) if fresh_colors is not None else None
         chart_colors = self._drop_old_paint(candles, chart_colors)
         fresh_colors = self._drop_old_paint(candles, fresh_colors)
-        if self.color_reader is not None:
-            self._note_chart_read(candles, seen, fresh_colors, shift_minutes)
-        else:
+        if self.color_reader is None:
             self._chart_read = ""
+        elif paint_waits:
+            self._chart_read = self._clock_blocks_paint(shift_minutes)
+        else:
+            self._note_chart_read(candles, seen, fresh_colors, shift_minutes)
         if await self._trade_is_open(symbol):
             if self._last_closed_ts is None:
                 self._last_closed_ts = last_ts
@@ -466,7 +529,7 @@ class SignalEngine:
             self._fresh_misses = 0
 
     async def _try_retest_entry(self, forming, symbol: str) -> bool:
-        """Enter as soon as a later candle touches the yellow or blue. Do not wait for its close."""
+        """Market order when the live ask is on the yellow high, or the bid is on the blue low."""
         pending = self._pending
         if pending is None or forming is None:
             return False
@@ -495,8 +558,8 @@ class SignalEngine:
                 **account,
             )
             return True
-        touched = float(forming.low) <= level <= float(forming.high)
-        if not touched:
+        quote = await self._quote(symbol)
+        if quote is None or not price_on_retest(quote[0], quote[1], level, buy=buy):
             return False
         account = await self._account_view()
         if self._expired_setups.contains(pending):

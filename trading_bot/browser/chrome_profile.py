@@ -173,6 +173,32 @@ def cdp_is_ready(port: int) -> bool:
         return False
 
 
+def spawn_chrome_for_login(
+    *,
+    chrome_path: Path,
+    user_data_dir: Path,
+    profile_directory: str,
+    url: str,
+) -> subprocess.Popen[bytes]:
+    """Open the bot's profile copy without remote debugging.
+
+    Google and some sites refuse sign-in in a debugged browser, and Windows Chrome
+    drops cookies copied from another User Data folder, so the login is made here.
+    """
+    args = [
+        str(chrome_path),
+        f"--user-data-dir={user_data_dir}",
+        f"--profile-directory={profile_directory}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        url,
+    ]
+    log.info("spawning_chrome_for_login", executable=str(chrome_path), profile=profile_directory)
+    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def spawn_chrome_with_cdp(
     *,
     chrome_path: Path,

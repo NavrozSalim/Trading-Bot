@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,7 @@ from trading_bot.safety.duplicate_protection import DuplicateProtection
 from trading_bot.safety.kill_switch import KillSwitch
 from trading_bot.strategy.signals import Signal, SignalType
 from trading_bot.strategy.strategy import SweepBreakoutStrategy
-from trading_bot.trading.engine import SignalEngine
+from trading_bot.trading.engine import SignalEngine, price_on_retest
 from trading_bot.trading.executor import NullExecutor, Position
 from trading_bot.trading.position_manager import PositionManager
 from trading_bot.trading.position_sizer import SymbolContract
@@ -49,6 +50,13 @@ class FakeTerminal:
     def __init__(self, batches: list[list[Candle]]) -> None:
         self.batches = batches
         self.i = 0
+        self.bid: float | None = None
+        self.ask: float | None = None
+
+    def tick(self, symbol: str) -> SimpleNamespace | None:
+        if self.bid is None or self.ask is None:
+            return None
+        return SimpleNamespace(bid=self.bid, ask=self.ask)
 
     def closed_candles(self, symbol: str, timeframe: str, count: int = 50) -> list[Candle]:
         batch = self.batches[min(self.i, len(self.batches) - 1)]
@@ -520,18 +528,28 @@ def _pending_buy() -> Signal:
     )
 
 
+def test_live_price_on_the_retest_allows_the_spread_only() -> None:
+    assert price_on_retest(4141.49, 4141.53, 4141.49, buy=True)
+    assert price_on_retest(4141.49, 4141.49, 4141.49, buy=True)
+    assert not price_on_retest(4141.53, 4141.57, 4141.49, buy=True)
+    assert not price_on_retest(4142.023, 4142.063, 4141.49, buy=True)
+    assert price_on_retest(4128.295, 4128.335, 4128.295, buy=False)
+    assert not price_on_retest(4127.762, 4127.802, 4128.295, buy=False)
+
+
 @pytest.mark.asyncio
-async def test_a_candle_below_the_level_is_not_a_retest(settings) -> None:  # type: ignore[no-untyped-def]
+async def test_retest_fires_only_when_the_live_price_is_on_the_level(settings) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"
     db = Database(settings)
     await db.start()
     executor = FakeExecutor()
+    terminal = FakeTerminal([BUY_PATTERN])
     engine = SignalEngine(
         settings,
         strategy=SweepBreakoutStrategy(sl_offset=0.80),
         executor=executor,
-        terminal=FakeTerminal([BUY_PATTERN]),  # type: ignore[arg-type]
+        terminal=terminal,  # type: ignore[arg-type]
         risk=RiskManager(settings),
         duplicates=DuplicateProtection(),
         positions=PositionManager(executor, KillSwitch()),
@@ -540,17 +558,9 @@ async def test_a_candle_below_the_level_is_not_a_retest(settings) -> None:  # ty
         database=db,
     )
     engine._pending = _pending_buy()
-    below = Candle(
-        timestamp=datetime(2026, 9, 23, 12, 7, tzinfo=timezone.utc),
-        open=9.4,
-        high=9.5,
-        low=9.2,
-        close=9.3,
-        is_closed=False,
-    )
-    assert await engine._try_retest_entry(below, "XAUUSD") is False
-    assert engine._pending is not None
-    touch = Candle(
+    terminal.bid = 9.30
+    terminal.ask = 9.34
+    away = Candle(
         timestamp=datetime(2026, 9, 23, 12, 7, tzinfo=timezone.utc),
         open=9.6,
         high=9.9,
@@ -558,7 +568,11 @@ async def test_a_candle_below_the_level_is_not_a_retest(settings) -> None:  # ty
         close=9.8,
         is_closed=False,
     )
-    assert await engine._try_retest_entry(touch, "XAUUSD") is True
+    assert await engine._try_retest_entry(away, "XAUUSD") is False
+    assert engine._pending is not None
+    terminal.bid = 9.70
+    terminal.ask = 9.74
+    assert await engine._try_retest_entry(away, "XAUUSD") is True
     await db.close()
 
 
@@ -567,6 +581,8 @@ async def test_the_retest_cancels_at_one_point_eight_not_at_the_target(settings)
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"
     engine, db = _engine(settings, None, [BUY_PATTERN])
+    engine.terminal.bid = 9.70  # type: ignore[attr-defined]
+    engine.terminal.ask = 9.74  # type: ignore[attr-defined]
     await db.start()
 
     def pending() -> Signal:
@@ -742,13 +758,57 @@ async def test_a_one_minute_clock_slide_does_not_copy_the_blue(settings, capsys)
         for candle in mt5
     ]
     slid = ChartMarket(late, forming, list(colors), fresh_colors=list(colors))
-    engine, db = _engine(settings, SequenceChart([exact, slid, slid]), [mt5])
+    engine, db = _engine(settings, SequenceChart([exact, exact, slid]), [mt5])
     await db.start()
     for _ in range(3):
         await engine.poll_once()
     await db.close()
     assert list(engine._color_memory.confirmed.values()) == ["blue"]
     assert list(engine._color_memory.confirmed) == [str(mt5[15].timestamp)]
+
+
+@pytest.mark.asyncio
+async def test_a_one_minute_clock_slide_does_not_paint_a_yellow(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    import random
+    from datetime import timedelta
+
+    rng = random.Random(5)
+    sides = [rng.random() < 0.5 for _ in range(20)]
+    mt5 = [_sided(minute, green) for minute, green in enumerate(sides)]
+    colors = [""] * 20
+    colors[15] = "yellow"
+    forming = Candle(
+        timestamp=datetime(2026, 9, 23, 12, 20, tzinfo=timezone.utc),
+        open=10.0,
+        high=10.1,
+        low=9.9,
+        close=10.0,
+        is_closed=False,
+    )
+    late = [
+        Candle(
+            timestamp=candle.timestamp + timedelta(minutes=1),
+            open=candle.open,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+            is_closed=True,
+        )
+        for candle in mt5
+    ]
+    slid = ChartMarket(late, forming, list(colors), fresh_colors=list(colors))
+    engine, db = _engine(settings, SequenceChart([slid, slid, slid]), [mt5])
+    await db.start()
+    for _ in range(3):
+        await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert engine._color_memory.confirmed == {}
+    assert "Clock moved" in text
+    assert "closed on TradingView" in text
+    assert "YELLOW DETECTED" not in text
 
 
 @pytest.mark.asyncio

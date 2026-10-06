@@ -241,7 +241,7 @@ def test_closed_candles_drop_forming_bar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stops_follow_the_fill_and_a_rejected_stop_closes_the_sell(settings) -> None:  # type: ignore[no-untyped-def]
+async def test_strategy_stops_are_sent_unchanged_and_a_rejected_stop_closes_the_sell(settings) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = False
     settings.mt5_symbol = "XAUUSD"
     settings.mt5_magic = 26092301
@@ -264,9 +264,8 @@ async def test_stops_follow_the_fill_and_a_rejected_stop_closes_the_sell(setting
     assert result.verified is False
     assert "closed because the stop and target were not accepted" in result.message
     assert api.sent[1]["action"] == FakeMt5.TRADE_ACTION_SLTP
-    assert api.sent[1]["sl"] == 4156.725
-    assert api.sent[1]["tp"] == 4155.349
-    assert float(api.sent[1]["sl"]) > 4155.637 > float(api.sent[1]["tp"])
+    assert api.sent[1]["sl"] == 4157.494
+    assert api.sent[1]["tp"] == 4156.118
     assert api.sent[2]["action"] == FakeMt5.TRADE_ACTION_DEAL
     assert api.sent[2]["type"] == FakeMt5.ORDER_TYPE_BUY
     assert api.sent[2]["position"] == 1001

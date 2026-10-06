@@ -12,6 +12,28 @@ import structlog
 from structlog.stdlib import BoundLogger
 
 
+class _EncodingSafeStream:
+    """Console logging must not crash when the page title contains symbols."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, message: str) -> int:
+        try:
+            return self._stream.write(message)
+        except UnicodeEncodeError:
+            encoding = getattr(self._stream, "encoding", None) or "utf-8"
+            safe = message.encode(encoding, errors="replace").decode(encoding)
+            return self._stream.write(safe)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def isatty(self) -> bool:
+        check = getattr(self._stream, "isatty", None)
+        return bool(check()) if callable(check) else False
+
+
 def setup_logging(logs_dir: Path, level: str = "INFO") -> BoundLogger:
     logs_dir.mkdir(parents=True, exist_ok=True)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -60,7 +82,7 @@ def setup_logging(logs_dir: Path, level: str = "INFO") -> BoundLogger:
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(json_formatter)
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(_EncodingSafeStream(sys.stdout))
     console_handler.setFormatter(console_formatter)
     console_handler.addFilter(_QuietMachineLines())
     root.addHandler(file_handler)
