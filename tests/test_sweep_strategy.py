@@ -118,7 +118,8 @@ def test_buy_take_profit_is_one_to_one_from_the_breakout() -> None:
     assert signal.extra["breakout_clock"] == "17:05"
 
 
-def test_the_yellow_candle_is_the_sweep_when_it_trades_below_the_prior_low() -> None:
+def test_the_yellow_below_the_prior_low_is_not_the_sweep() -> None:
+    """The yellow low is under the candle before it. No later candle goes under the yellow low."""
     candles = [
         _c(0, 10.0, 11.0, 9.50, 9.60),
         _c(1, 9.60, 10.0, 9.40, 9.50),
@@ -132,16 +133,12 @@ def test_the_yellow_candle_is_the_sweep_when_it_trades_below_the_prior_low() -> 
     signal = SweepBreakoutStrategy(sl_offset=0.80).evaluate(
         candles, symbol="XAUUSD", timeframe="1M", colors=colors
     )
-    assert signal.reason == "await_yellow_retest"
-    assert signal.extra["sweep_low"] == "9.2"
-    assert signal.extra["sweep_clock"] == "17:02"
-    assert signal.extra["setup_clock"] == "17:02"
-    assert signal.stop_loss == round(9.20 - 0.80, 5)
-    assert signal.take_profit == round(9.85 + (9.70 - 9.20), 5)
-    assert "SWEEP COMPLETE 17:02" in signal.extra["stage_log"]
+    assert signal.reason == "yellow_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "SETUP INVALID BECAUSE NO LOW SWEEP 17:05" in signal.extra["stage_log"]
 
 
-def test_the_blue_candle_is_the_sweep_when_it_trades_above_the_prior_high() -> None:
+def test_the_blue_above_the_prior_high_is_not_the_sweep() -> None:
     candles = [
         _c(0, 10.0, 10.20, 9.90, 10.15),
         _c(1, 10.15, 10.40, 10.10, 10.30),
@@ -155,10 +152,9 @@ def test_the_blue_candle_is_the_sweep_when_it_trades_above_the_prior_high() -> N
     signal = SweepBreakoutStrategy(sl_offset=0.80).evaluate(
         candles, symbol="XAUUSD", timeframe="1M", colors=colors
     )
-    assert signal.reason == "await_blue_retest"
-    assert signal.extra["sweep_high"] == "10.9"
-    assert signal.extra["sweep_clock"] == "17:02"
-    assert signal.stop_loss == round(10.90 + 0.80, 5)
+    assert signal.reason == "blue_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "SETUP INVALID BECAUSE NO HIGH SWEEP 17:04" in signal.extra["stage_log"]
 
 
 def test_reds_before_the_yellow_do_not_have_to_touch() -> None:
@@ -389,33 +385,296 @@ def test_buy_stage_log_lists_each_finished_part() -> None:
     assert "SETUP COMPLETE — WAITING FOR RETEST" in text
 
 
-def test_breakout_before_the_sweep_still_waits_for_the_retest() -> None:
+def test_a_two_candle_breakout_without_a_low_sweep_is_invalid() -> None:
+    """The breakout closed with two bullish candles. The later low does not count as the sweep."""
+    candles = [
+        _c(0, 10.0, 11.0, 9.50, 9.60),
+        _c(1, 9.60, 10.0, 9.40, 9.50),
+        _c(2, 9.50, 9.70, 9.45, 9.55),
+        _c(3, 9.55, 9.68, 9.48, 9.62),
+        _c(4, 9.62, 10.10, 9.50, 9.95),
+        _c(5, 9.90, 9.95, 9.20, 9.40),
+    ]
+    colors = [""] * len(candles)
+    colors[2] = "yellow"
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
+    assert signal.signal is SignalType.NO_TRADE
+    assert signal.reason == "yellow_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "BREAKOUT COMPLETE 17:04" in signal.extra["stage_log"]
+    assert "SETUP INVALID BECAUSE NO LOW SWEEP 17:04" in signal.extra["stage_log"]
+    assert "WAITING FOR RETEST" not in signal.extra["stage_log"]
+
+
+def test_a_two_candle_breakdown_without_a_high_sweep_is_invalid() -> None:
+    candles = [
+        _c(0, 10.0, 10.20, 9.90, 10.15),
+        _c(1, 10.15, 10.50, 10.10, 10.40),
+        _c(2, 10.40, 10.45, 10.20, 10.25),
+        _c(3, 10.25, 10.40, 10.22, 10.35),
+        _c(4, 10.35, 10.42, 10.22, 10.28),
+        _c(5, 10.28, 10.30, 10.05, 10.10),
+        _c(6, 10.10, 11.40, 10.05, 10.20),
+    ]
+    colors = [""] * len(candles)
+    colors[2] = "blue"
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
+    assert signal.signal is SignalType.NO_TRADE
+    assert signal.reason == "blue_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "SETUP INVALID BECAUSE NO HIGH SWEEP 17:05" in signal.extra["stage_log"]
+    assert "WAITING FOR RETEST" not in signal.extra["stage_log"]
+
+
+def test_bearish_candles_can_sit_between_the_two_bullish_candles() -> None:
+    """19:00 yellow, 19:01 sweep, 19:02 bullish under the high, then two reds, then the breakout."""
     candles = [
         _c(0, 10.0, 11.0, 9.50, 9.60),
         _c(1, 9.60, 10.0, 9.40, 9.50),
         _c(2, 9.50, 9.70, 9.20, 9.55),
-        _c(3, 9.60, 10.00, 9.50, 9.90),
-        _c(4, 9.90, 10.10, 9.55, 10.00),
-        _c(5, 9.80, 9.90, 9.10, 9.40),
+        _c(3, 9.55, 9.60, 9.00, 9.40),
+        _c(4, 9.40, 9.66, 9.35, 9.60),
+        _c(5, 9.60, 9.62, 9.30, 9.40),
+        _c(6, 9.40, 9.45, 9.28, 9.32),
+        _c(7, 9.32, 10.10, 9.30, 9.95),
     ]
-    signal = SweepBreakoutStrategy().evaluate(candles, symbol="XAUUSD", timeframe="1M")
+    colors = [""] * len(candles)
+    colors[2] = "yellow"
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
     assert signal.reason == "await_yellow_retest"
-    assert "BREAKOUT COMPLETE" in signal.extra["stage_log"]
-    assert "SWEEP COMPLETE" in signal.extra["stage_log"]
+    assert signal.extra["breakout_clock"] == "17:07"
+    assert "BREAKOUT COMPLETE 17:07" in signal.extra["stage_log"]
 
 
-def test_one_candle_can_sweep_and_break_out() -> None:
+def test_the_first_bullish_close_above_the_yellow_cancels_the_buy() -> None:
+    """17:50 closed above the yellow high. The later green at 17:51 does not become the breakout."""
     candles = [
         _c(0, 10.0, 11.0, 9.50, 9.60),
         _c(1, 9.60, 10.0, 9.40, 9.50),
         _c(2, 9.50, 9.70, 9.20, 9.55),
-        _c(3, 9.55, 9.65, 9.50, 9.60),
-        _c(4, 9.60, 10.00, 9.10, 9.85),
-        _c(5, 9.80, 9.90, 9.40, 9.70),
+        _c(3, 9.55, 9.60, 9.00, 9.40),
+        _c(4, 9.40, 10.00, 9.35, 9.90),
+        _c(5, 9.90, 10.40, 9.80, 10.20),
     ]
-    signal = SweepBreakoutStrategy().evaluate(candles, symbol="XAUUSD", timeframe="1M")
+    colors = [""] * len(candles)
+    colors[2] = "yellow"
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
+    assert signal.signal is SignalType.NO_TRADE
+    assert signal.reason == "yellow_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:04" in signal.extra["stage_log"]
+    assert "BREAKOUT COMPLETE" not in signal.extra["stage_log"]
+    assert "WAITING FOR RETEST" not in signal.extra["stage_log"]
+
+
+def test_the_first_bearish_close_below_the_blue_cancels_the_sell() -> None:
+    candles = [
+        _c(0, 10.0, 10.20, 9.90, 10.15),
+        _c(1, 10.15, 10.40, 10.10, 10.30),
+        _c(2, 10.30, 10.90, 10.20, 10.25),
+        _c(3, 10.25, 11.20, 10.15, 10.40),
+        _c(4, 10.40, 10.45, 10.00, 10.10),
+        _c(5, 10.10, 10.15, 9.80, 9.90),
+    ]
+    colors = [""] * len(candles)
+    colors[2] = "blue"
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
+    assert signal.signal is SignalType.NO_TRADE
+    assert signal.reason == "blue_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert "SETUP INVALID BECAUSE SINGLE CANDLE BREAKDOWN 17:04" in signal.extra["stage_log"]
+    assert "BREAKDOWN COMPLETE" not in signal.extra["stage_log"]
+    assert "WAITING FOR RETEST" not in signal.extra["stage_log"]
+
+
+def _yellow_green_sweep() -> list[Candle]:
+    """17:03 is green, sweeps the yellow low, and already closes above the yellow high."""
+    return [
+        _c(0, 10.0, 11.0, 9.50, 9.60),
+        _c(1, 9.60, 10.0, 9.40, 9.50),
+        _c(2, 9.50, 9.70, 9.20, 9.55),
+        _c(3, 9.55, 9.90, 9.10, 9.85),
+        _c(4, 9.85, 9.88, 9.60, 9.65),
+        _c(5, 9.65, 9.70, 9.55, 9.60),
+    ]
+
+
+def _paint(candles: list[Candle], **marks: str) -> list[str]:
+    colors = [""] * len(candles)
+    for key, color in marks.items():
+        colors[int(key[1:])] = color
+    return colors
+
+
+def test_a_green_sweep_closing_above_waits_for_one_more_bullish() -> None:
+    candles = _yellow_green_sweep()
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="yellow")
+    )
+    assert signal.reason == "yellow_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "0"
+    assert "SINGLE CANDLE" not in signal.extra["stage_log"]
+
+    candles.append(_c(6, 9.60, 10.00, 9.58, 9.90))
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="yellow")
+    )
     assert signal.reason == "await_yellow_retest"
-    assert "SWEEP + BREAKOUT COMPLETE" in signal.extra["stage_log"]
+    assert signal.extra["sweep_clock"] == "17:03"
+    assert signal.extra["breakout_clock"] == "17:06"
+
+
+def _blue_red_sweep() -> list[Candle]:
+    """19:01 in the example: red, sweeps the blue high, and already closes under the blue low."""
+    return [
+        _c(0, 10.0, 10.20, 9.90, 10.15),
+        _c(1, 10.15, 10.40, 10.10, 10.30),
+        _c(2, 10.30, 10.90, 10.20, 10.25),
+        _c(3, 10.25, 11.00, 10.00, 10.05),
+        _c(4, 10.05, 10.15, 10.00, 10.10),
+        _c(5, 10.10, 10.12, 10.02, 10.11),
+    ]
+
+
+def test_a_red_sweep_closing_under_waits_for_one_more_red() -> None:
+    candles = _blue_red_sweep()
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue")
+    )
+    assert signal.reason == "blue_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "0"
+    assert "SINGLE CANDLE" not in signal.extra["stage_log"]
+
+    candles.append(_c(6, 10.11, 10.12, 9.90, 9.95))
+    signal = SweepBreakoutStrategy(sl_offset=0.80).evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue")
+    )
+    assert signal.reason == "await_blue_retest"
+    assert signal.extra["sweep_clock"] == "17:03"
+    assert signal.extra["breakout_clock"] == "17:06"
+    assert signal.stop_loss == round(11.00 + 0.80, 5)
+
+
+def test_a_newer_blue_before_the_breakdown_replaces_the_older_blue() -> None:
+    candles = [
+        _c(0, 10.0, 10.20, 9.90, 10.15),
+        _c(1, 10.15, 10.40, 10.10, 10.30),
+        _c(2, 10.30, 10.90, 10.20, 10.25),
+        _c(3, 10.25, 10.50, 10.22, 10.45),
+        _c(4, 10.45, 10.60, 10.40, 10.55),
+        _c(5, 10.55, 10.70, 10.45, 10.50),
+        _c(6, 10.50, 10.52, 10.30, 10.35),
+    ]
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue", m4="blue")
+    )
+    assert signal.reason == "await_blue_retest"
+    assert signal.extra["setup_clock"] == "17:04"
+    assert signal.extra["retest_level"] == "10.4"
+
+
+def test_a_newer_blue_after_the_breakdown_keeps_the_older_sell() -> None:
+    candles = _sell_breakdown() + [_c(6, 10.10, 10.18, 10.05, 10.15)]
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue", m6="blue")
+    )
+    assert signal.reason == "await_blue_retest"
+    assert signal.extra["setup_clock"] == "17:02"
+    assert signal.extra["retest_level"] == "10.2"
+
+
+def _blue_then(yellow: Candle) -> list[Candle]:
+    return [
+        _c(0, 10.0, 10.20, 9.90, 10.15),
+        _c(1, 10.15, 10.40, 10.10, 10.30),
+        _c(2, 10.30, 10.90, 10.20, 10.25),
+        yellow,
+        _c(4, 10.15, 10.20, 10.12, 10.18),
+        _c(5, 10.18, 10.22, 10.14, 10.16),
+    ]
+
+
+def test_a_yellow_sweeping_the_blue_high_ends_the_sell_and_starts_a_buy() -> None:
+    candles = _blue_then(_c(3, 10.25, 11.00, 10.10, 10.15))
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue", m3="yellow")
+    )
+    assert signal.extra["pattern"] == "buy_yellow_sweep"
+    assert signal.extra["setup_clock"] == "17:03"
+
+
+def test_a_yellow_closing_under_the_blue_ends_the_sell_and_starts_a_buy() -> None:
+    candles = _blue_then(_c(3, 10.25, 10.40, 9.90, 10.00))
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue", m3="yellow")
+    )
+    assert signal.extra["pattern"] == "buy_yellow_sweep"
+    assert signal.extra["setup_clock"] == "17:03"
+
+
+def test_a_yellow_that_does_neither_expires_both() -> None:
+    candles = _blue_then(_c(3, 10.30, 10.50, 10.22, 10.28))
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="blue", m3="yellow")
+    )
+    assert signal.signal is SignalType.NO_TRADE
+    assert signal.reason == "blue_on_chart_no_breakout"
+    assert signal.extra["setup_invalid"] == "1"
+    assert signal.extra["setup_clock"] == "17:02"
+    assert "SETUP INVALID BECAUSE YELLOW CANDLE AFTER THE BLUE 17:03" in signal.extra["stage_log"]
+    assert "BOTH EXPIRED" in signal.extra["stage_log"]
+
+
+def test_after_both_expire_the_next_blue_starts_again() -> None:
+    candles = _blue_then(_c(3, 10.30, 10.50, 10.22, 10.28))
+    colors = _paint(candles, m2="blue", m3="yellow", m5="blue")
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=colors
+    )
+    assert signal.extra["pattern"] == "sell_blue_sweep"
+    assert signal.extra["setup_clock"] == "17:05"
+
+
+def test_a_blue_that_does_neither_expires_the_buy() -> None:
+    candles = _buy_0603()
+    candles[3] = _c(3, 9.55, 9.65, 9.25, 9.60)
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m2="yellow", m3="blue")
+    )
+    assert signal.reason == "yellow_on_chart_no_breakout"
+    assert "SETUP INVALID BECAUSE BLUE CANDLE AFTER THE YELLOW 17:03" in signal.extra["stage_log"]
+
+
+def test_a_yellow_is_not_counted_as_a_red_before_the_next_yellow() -> None:
+    candles = [
+        _c(0, 9.90, 10.50, 9.85, 10.40),
+        _c(1, 10.40, 10.45, 10.00, 10.10),
+        _c(2, 10.10, 10.15, 9.80, 9.90),
+        _c(3, 9.90, 10.00, 9.70, 9.85),
+        _c(4, 9.85, 9.95, 9.60, 9.90),
+        _c(5, 9.90, 10.20, 9.85, 10.10),
+    ]
+    plain = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m3="yellow")
+    )
+    assert plain.reason == "await_yellow_retest"
+
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m1="yellow", m3="yellow")
+    )
+    assert signal.extra["setup_clock"] == "17:03"
+    assert signal.reason != "await_yellow_retest"
+    assert "2 RED CANDLES" not in signal.extra["stage_log"]
 
 
 def test_target_and_cancel_use_the_breakout_price() -> None:

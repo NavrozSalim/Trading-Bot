@@ -835,6 +835,16 @@ def test_invalid_setup_reason_keeps_the_specific_line() -> None:
         "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
     )
     assert invalid_setup_reason(stage) == "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
+    single = (
+        "YELLOW DETECTED — BUY SETUP 17:48 | "
+        "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:50"
+    )
+    assert invalid_setup_reason(single) == "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:50"
+    no_sweep = (
+        "YELLOW DETECTED — BUY SETUP 17:48 | BREAKOUT COMPLETE 17:51 | "
+        "SETUP INVALID BECAUSE NO LOW SWEEP 17:51"
+    )
+    assert invalid_setup_reason(no_sweep) == "SETUP INVALID BECAUSE NO LOW SWEEP 17:51"
     assert invalid_setup_reason("YELLOW DETECTED — BUY SETUP 14:45") == ""
 
 
@@ -870,3 +880,35 @@ async def test_an_invalid_setup_is_written_to_excel_with_its_reason(settings) ->
     assert sheet.max_row == 2
     assert sheet["E2"].value == "INVALID"
     assert sheet["F2"].value == "SETUP INVALID — RED DOES NOT TOUCH THE YELLOW 14:56"
+
+
+@pytest.mark.asyncio
+async def test_a_single_candle_breakout_is_written_to_excel_with_that_reason(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    engine, db = _engine(settings, BlankChart())
+    await db.start()
+    signal = Signal(
+        signal=SignalType.NO_TRADE,
+        reason="yellow_on_chart_no_breakout",
+        symbol="XAUUSD",
+        timeframe="1M",
+        candle_timestamp="2026-10-06T12:50",
+        extra={
+            "anchor_time": "2026-10-06T12:48",
+            "stage_log": (
+                "YELLOW DETECTED — BUY SETUP 17:48 | "
+                "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:50"
+            ),
+            "yellow_low": "4165.9",
+            "yellow_high": "4169.2",
+        },
+    )
+    await engine._record_excel_invalid("XAUUSD", signal)
+    await db.close()
+    book = settings.logs_dir.parent / "data" / "trades.xlsx"
+    import openpyxl
+
+    sheet = openpyxl.load_workbook(book).active
+    assert sheet["E2"].value == "INVALID"
+    assert sheet["F2"].value == "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:50"
