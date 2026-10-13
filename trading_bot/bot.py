@@ -156,7 +156,7 @@ class TradingBot:
                 ctx.health.update(browser_status="disconnected", last_error=str(exc))
 
         ctx.engine.color_reader = ScreenColorReader()
-        if ctx.health.snapshot().browser_status == "connected":
+        if ctx.health.snapshot.browser_status == "connected":
             ctx.engine.refresh_chart = self._reload_chart
         ctx.health.update(bot_status="running")
         mode = "DRY RUN" if settings.dry_run else settings.trading_mode.value
