@@ -156,6 +156,8 @@ class TradingBot:
                 ctx.health.update(browser_status="disconnected", last_error=str(exc))
 
         ctx.engine.color_reader = ScreenColorReader()
+        if ctx.health.snapshot().browser_status == "connected":
+            ctx.engine.refresh_chart = self._reload_chart
         ctx.health.update(bot_status="running")
         mode = "DRY RUN" if settings.dry_run else settings.trading_mode.value
         print(f"\nBot running ({mode}). Strategy: yellow/blue sweep + 2-candle breakout.")
@@ -176,6 +178,10 @@ class TradingBot:
             await ctx.browser.close()
             await ctx.database.close()
             ctx.health.update(bot_status="stopped", browser_status="disconnected")
+
+    async def _reload_chart(self) -> None:
+        page = await self.ctx.browser.bring_to_front()
+        await page.reload(wait_until="domcontentloaded")
 
     async def _loop(self) -> None:
         ctx = self.ctx

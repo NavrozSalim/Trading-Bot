@@ -37,6 +37,8 @@ log = get_logger("trading_bot.engine")
 
 _BARS = 80
 _MATCH_REACH = 180
+_FROZEN_SECONDS = 120
+_RELOAD_EVERY_SECONDS = 300
 _MATCH_MIN_VOTES = 8
 _MATCH_MIN_AGREE = 0.75
 
@@ -147,6 +149,8 @@ class SignalEngine:
         self._last_skip = ("", 0.0)
         self._invalid_written: set[str] = set()
         self.color_reader = None
+        self.refresh_chart = None
+        self._last_refresh = 0.0
         self._color_memory = ColorMemory()
         self.journal = TradeExcel(settings.logs_dir.parent / "data" / "trades.xlsx")
 
@@ -306,15 +310,20 @@ class SignalEngine:
         paint_waits = False
         if self.color_reader is not None and hasattr(self.color_reader, "read_market"):
             market = await self.color_reader.read_market()
+            if await self._chart_frozen(symbol):
+                return
             candles_on_screen = market is not None and 40 <= len(market.closed) <= 55
-            if market is not None and market.clipped and not candles_on_screen:
-                fit = getattr(self.color_reader, "fit_price_scale", None)
-                if fit is not None:
-                    await fit()
-                await self._log_cut_off_candle(symbol)
-                return
-            if market is not None and await self._zoom_chart(symbol, len(market.closed), market.price_span):
-                return
+            if market is not None and not candles_on_screen:
+                if len(market.closed) < 40 and await self._reset_price_scale(symbol):
+                    return
+                if await self._zoom_chart(symbol, len(market.closed), market.price_span):
+                    return
+                if market.clipped:
+                    fit = getattr(self.color_reader, "fit_price_scale", None)
+                    if fit is not None:
+                        await fit()
+                    await self._log_cut_off_candle(symbol)
+                    return
             history = await asyncio.to_thread(
                 self.terminal.closed_candles, symbol, self.settings.timeframe, _BARS + _MATCH_REACH
             )
@@ -603,6 +612,49 @@ class SignalEngine:
             return False
         self._pending = None
         await self._log_chart_zoom(symbol)
+        return True
+
+    async def _chart_frozen(self, symbol: str) -> bool:
+        """The same picture for two minutes means TradingView stopped drawing. Zooming cannot fix that."""
+        still = float(getattr(self.color_reader, "unchanged_seconds", 0.0) or 0.0)
+        if still < _FROZEN_SECONDS:
+            return False
+        reloaded = False
+        now = time.monotonic()
+        if self.refresh_chart is not None and now - self._last_refresh >= _RELOAD_EVERY_SECONDS:
+            self._last_refresh = now
+            try:
+                await self.refresh_chart()
+                reloaded = True
+                log.info("chart_page_reloaded", frozen_seconds=int(still))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chart_reload_failed", error=str(exc))
+        await self._log_unreadable_chart(
+            symbol,
+            f"CHART PICTURE IS FROZEN — the TradingView picture has not changed for {int(still // 60)} "
+            "minutes (window covered, minimized, or the page stopped updating). "
+            + ("The chart page was reloaded. " if reloaded else "")
+            + "No trade on this check.",
+        )
+        return True
+
+    async def _reset_price_scale(self, symbol: str) -> bool:
+        """Too few candles usually means the price moved above or below the box. Auto scale brings them back."""
+        fit = getattr(self.color_reader, "fit_price_scale", None)
+        if fit is None or not await fit():
+            return False
+        account = await self._account_view()
+        self._say(
+            symbol=symbol,
+            timeframe=self.settings.timeframe,
+            signal="NO_TRADE",
+            signal_reason=(
+                "PRICE SCALE RESET — candles moved above or below the chart box, so the price scale "
+                "was set back to auto. No trade on this check."
+            ),
+            trade_action="NO_TRADE",
+            **account,
+        )
         return True
 
     async def _log_chart_zoom(self, symbol: str) -> None:

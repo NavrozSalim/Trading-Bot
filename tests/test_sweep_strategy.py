@@ -685,3 +685,27 @@ def test_target_and_cancel_use_the_breakout_price() -> None:
     assert reward_target(4501.5, 5.0, buy=False) == 4496.5
     assert reward_target(4501.5, 5.0, buy=True, ratio=CANCEL_R) == 4510.5
     assert reward_target(4501.5, 5.0, buy=False, ratio=CANCEL_R) == 4492.5
+
+
+def test_a_green_before_the_sweep_still_counts_toward_the_two() -> None:
+    """6:07 green, 6:08 red sweep, 6:09 green breakout. Both greens count."""
+    candles = [
+        _c(3, 10.00, 10.20, 9.70, 9.80),
+        _c(4, 9.80, 9.90, 9.50, 9.60),
+        _c(5, 9.60, 9.85, 9.55, 9.75),
+        _c(6, 9.75, 9.90, 9.60, 9.70),
+        _c(7, 9.70, 9.88, 9.62, 9.85),
+        _c(8, 9.85, 9.86, 9.40, 9.50),
+        _c(9, 9.50, 10.10, 9.55, 10.00),
+        _c(10, 10.00, 10.20, 9.95, 10.15),
+        _c(11, 10.15, 10.16, 9.80, 9.90),
+        _c(12, 9.90, 9.95, 9.85, 9.88),
+    ]
+    signal = SweepBreakoutStrategy().evaluate(
+        candles, symbol="XAUUSD", timeframe="1M", colors=_paint(candles, m3="yellow")
+    )
+    assert signal.reason == "await_yellow_retest"
+    assert signal.extra["setup_clock"] == "17:06"
+    assert signal.extra["sweep_clock"] == "17:08"
+    assert signal.extra["breakout_clock"] == "17:09"
+    assert "SINGLE CANDLE" not in signal.extra["stage_log"]

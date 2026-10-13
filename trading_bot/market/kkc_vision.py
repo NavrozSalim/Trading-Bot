@@ -379,10 +379,25 @@ class ScreenColorReader:
         self._last_fit = 0.0
         self.last_bars = 0
         self._last_zoom = ("", 0.0)
+        self._picture = b""
+        self._picture_since = 0.0
 
     @property
     def ready(self) -> bool:
         return self.vision.ready
+
+    @property
+    def unchanged_seconds(self) -> float:
+        """How long the captured chart has been pixel for pixel the same."""
+        if not self._picture:
+            return 0.0
+        return time.monotonic() - self._picture_since
+
+    def _note_picture(self, image: np.ndarray) -> None:
+        picture = np.ascontiguousarray(image[::4, ::4]).tobytes()
+        if picture != self._picture:
+            self._picture = picture
+            self._picture_since = time.monotonic()
 
     async def colors_for(self, count: int) -> list[str]:
         self.vision = load_vision(self.path)
@@ -417,6 +432,7 @@ class ScreenColorReader:
         except Exception as exc:  # noqa: BLE001
             log.warning("kkc_capture_failed", error=str(exc))
             return None
+        self._note_picture(image)
         self.last_bars = await asyncio.to_thread(candle_run_count, image)
         market = await asyncio.to_thread(
             market_from_bgr,

@@ -7,9 +7,27 @@ from trading_bot.market.kkc_vision import (
     ChartVision,
     ColorMemory,
     HsvRange,
+    ScreenColorReader,
     colors_from_bgr,
     range_from_samples,
 )
+from trading_bot.market import kkc_vision
+
+
+def test_the_frozen_timer_counts_only_while_the_picture_stays_the_same(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    clock = [100.0]
+    monkeypatch.setattr(kkc_vision.time, "monotonic", lambda: clock[0])
+    reader = ScreenColorReader(tmp_path / "config.json")
+    still = np.zeros((40, 80, 3), dtype=np.uint8)
+    assert reader.unchanged_seconds == 0.0
+    reader._note_picture(still)
+    clock[0] = 250.0
+    reader._note_picture(still.copy())
+    assert reader.unchanged_seconds == 150.0
+    moved = still.copy()
+    moved[0, 0] = 255
+    reader._note_picture(moved)
+    assert reader.unchanged_seconds == 0.0
 
 
 def _vision() -> ChartVision:

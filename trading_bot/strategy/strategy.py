@@ -20,7 +20,7 @@ BUY
 - A yellow is not counted as one of those reds
 - Those reds do not have to touch each other or the yellow
 - Then a later candle sweeps the yellow low. Wick or body is enough. The yellow itself is not the sweep
-- Then at least two bullish candles, counted from the sweep. Bearish candles may sit between them
+- Then at least two bullish candles after the yellow. One may come before the low sweep and the other after it. Bearish candles may sit between them
 - A green sweep candle counts as one of the two, even when it already closed above the yellow high
 - The breakout is the second bullish candle or a later one that closes above the yellow high
 - Any other first bullish close above the yellow high finishes the yellow (single candle breakout)
@@ -37,7 +37,7 @@ SELL is the mirror
 - A blue is not counted as one of those greens
 - Those greens do not have to touch each other or the blue
 - Then a later candle sweeps the blue high. Wick or body is enough. The blue itself is not the sweep
-- Then at least two bearish candles, counted from the sweep. Bullish candles may sit between them
+- Then at least two bearish candles after the blue. One may come before the high sweep and the other after it. Bullish candles may sit between them
 - A red sweep candle counts as one of the two, even when it already closed under the blue low
 - The breakdown is the second bearish candle or a later one that closes under the blue low
 - Any other first bearish close under the blue low finishes the blue (single candle breakdown)
@@ -151,11 +151,12 @@ class _Parts:
 
 
 def _setup_parts(candles: Sequence[CandleLike], at: int, *, buy: bool) -> _Parts:
-    """Sweep first, then at least two candles in the breakout direction, counted from the sweep.
+    """Two candles in the breakout direction after the colored candle, then a close past its level.
 
-    A sweep candle in the breakout direction is the first of the two, even when it
-    already closed past the level. Any other first close past the level finishes
-    the setup. A close past the level before the sweep also finishes it.
+    A candle before the sweep still counts. The sweep candle counts too when it
+    goes the breakout way, even if it already closed past the level. Any other
+    first close past the level finishes the setup. A close past the level before
+    the sweep also finishes it.
     """
     anchor = candles[at]
     with_trend = is_green if buy else is_red
@@ -165,7 +166,6 @@ def _setup_parts(candles: Sequence[CandleLike], at: int, *, buy: bool) -> _Parts
         candle = candles[index]
         if sweep_at is None and (candle.low < anchor.low if buy else candle.high > anchor.high):
             sweep_at = index
-            count = 0
         if not with_trend(candle):
             continue
         count += 1

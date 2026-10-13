@@ -462,6 +462,99 @@ async def test_a_readable_chart_is_not_zoomed_or_reset(settings, capsys) -> None
     assert "CANDLE CUT OFF" not in text
 
 
+def _forming_at_one() -> Candle:
+    return Candle(
+        timestamp=datetime(2026, 9, 23, 13, 0, tzinfo=timezone.utc),
+        open=10.2,
+        high=10.4,
+        low=10.1,
+        close=10.2,
+        is_closed=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_too_many_candles_with_a_cut_off_wick_still_zoom_in(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    closed = [_c(minute % 60, 10.0, 11.0, 9.0, 10.2) for minute in range(65)]
+    reader = ScaleReader(ChartMarket(closed, _forming_at_one(), [""] * 65, clipped=True))
+    engine, db = _engine(settings, reader)
+    await db.start()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert reader.actions == ["time-in"]
+    assert reader.fits == 0
+    assert "CHART ZOOM" in text
+
+
+@pytest.mark.asyncio
+async def test_too_few_candles_reset_the_price_scale_first(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    closed = [_c(minute % 60, 10.0, 11.0, 9.0, 10.2) for minute in range(26)]
+    reader = ScaleReader(ChartMarket(closed, _forming_at_one(), [""] * 26, price_span=13))
+    engine, db = _engine(settings, reader)
+    await db.start()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert reader.fits == 1
+    assert reader.actions == []
+    assert "PRICE SCALE RESET" in text
+    assert "would send" not in text
+
+
+@pytest.mark.asyncio
+async def test_too_few_candles_zoom_out_while_the_scale_reset_waits(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    closed = [_c(minute % 60, 10.0, 11.0, 9.0, 10.2) for minute in range(26)]
+    reader = ScaleReader(ChartMarket(closed, _forming_at_one(), [""] * 26, price_span=13))
+
+    async def waiting() -> bool:
+        return False
+
+    reader.fit_price_scale = waiting  # type: ignore[method-assign]
+    engine, db = _engine(settings, reader)
+    await db.start()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert reader.actions == ["time-out"]
+    assert "CHART ZOOM" in text
+
+
+class FrozenReader(ZoomReader):
+    unchanged_seconds = 300.0
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_picture_reloads_the_chart_and_does_not_zoom(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    closed = [_c(minute % 60, 10.0, 11.0, 9.0, 10.2) for minute in range(26)]
+    reader = FrozenReader(ChartMarket(closed, _forming_at_one(), [""] * 26, price_span=13))
+    engine, db = _engine(settings, reader)
+    reloads: list[int] = []
+
+    async def reload() -> None:
+        reloads.append(1)
+
+    engine.refresh_chart = reload
+    await db.start()
+    await engine.poll_once()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert reader.actions == []
+    assert reloads == [1]
+    assert "CHART PICTURE IS FROZEN" in text
+    assert "The chart page was reloaded" in text
+    assert "would send" not in text
+
+
 @pytest.mark.asyncio
 async def test_a_cut_off_candle_does_not_trade(settings, capsys) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
