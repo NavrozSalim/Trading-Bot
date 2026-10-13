@@ -40,12 +40,35 @@ def test_trade_excel_saves_open_and_close(tmp_path) -> None:  # type: ignore[no-
 
     sheet = load_workbook(book.path).active
     assert sheet["E2"].value == "BUY"
-    assert sheet["S2"].value == 0.02
-    assert sheet["T2"].value == "1001"
-    assert sheet["U2"].value == 4411.8
-    assert sheet["V2"].value == 12.5
-    assert sheet["W2"].value == "target"
+    assert sheet["L1"].value == "Retest time"
+    assert sheet["T2"].value == 0.02
+    assert sheet["U2"].value == "1001"
+    assert sheet["V2"].value == 4411.8
+    assert sheet["W2"].value == 12.5
+    assert sheet["X2"].value == "target"
     assert not (tmp_path / ".trades.xlsx.tmp").exists()
+
+
+def test_an_older_workbook_gains_the_retest_column_without_moving_the_trade(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "trades.xlsx"
+    from openpyxl import Workbook
+
+    old = Workbook()
+    headers = [name for name in trade_excel.HEADERS if name != "Retest time"]
+    old.active.append(headers)
+    old.active.append(["2026-10-13 11:52:08", "", "XAUUSD", "1M", "BUY", "yellow 17:05"] + [""] * (len(headers) - 6))
+    ticket_at = headers.index("Ticket")
+    old.active.cell(2, ticket_at + 1, "2041")
+    old.save(path)
+
+    TradeExcel(path).record_close("2041", exit_price=4190.3, profit=17.45, exit_reason="closed")
+    sheet = load_workbook(path).active
+    assert [cell.value for cell in sheet[1]] == trade_excel.HEADERS
+    assert sheet["E2"].value == "BUY"
+    assert sheet["F2"].value == "yellow 17:05"
+    assert sheet["L2"].value is None
+    assert sheet["V2"].value == 4190.3
+    assert sheet["W2"].value == 17.45
 
 
 def test_a_broken_workbook_is_replaced_and_the_old_file_is_kept(tmp_path) -> None:  # type: ignore[no-untyped-def]

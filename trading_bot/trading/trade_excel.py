@@ -28,6 +28,7 @@ HEADERS = [
     "Sweep price",
     "Breakout price",
     "Entry type",
+    "Retest time",
     "Entry price",
     "Stop",
     "Target",
@@ -109,11 +110,28 @@ class TradeExcel:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists() and self.path.stat().st_size > 0:
             try:
-                return load_workbook(self.path)
+                book = load_workbook(self.path)
             except (BadZipFile, InvalidFileException, EOFError, KeyError, ValueError) as exc:
                 log.warning("trade_excel_unreadable", path=str(self.path), error=str(exc))
                 self._park_broken_file()
+                return self._new_book()
+            self._ensure_columns(book.active)
+            return book
         return self._new_book()
+
+    @staticmethod
+    def _ensure_columns(sheet: Worksheet) -> None:
+        """Insert any column this version added, so older rows keep their places."""
+        current = [cell.value for cell in sheet[1]]
+        for index, name in enumerate(HEADERS):
+            if index < len(current) and current[index] == name:
+                continue
+            if name in current:
+                return
+            sheet.insert_cols(index + 1)
+            cell = sheet.cell(1, index + 1, name)
+            cell.font = Font(bold=True)
+            current.insert(index, name)
 
     def _park_broken_file(self) -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")

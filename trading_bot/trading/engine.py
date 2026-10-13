@@ -945,6 +945,9 @@ class SignalEngine:
                 log.warning("trade_excel_points_unavailable", error=str(exc))
         risk_money = round(balance * (self.settings.risk_per_trade_pct / 100.0), 2)
         entry_type = "retest touch" if signal.reason == "retest_touch" else "candle close"
+        retest_time = ""
+        if signal.reason == "retest_touch":
+            retest_time = server_to_chart_time(datetime.now(timezone.utc)).strftime("%H:%M:%S")
         mode = "DRY RUN" if self.settings.dry_run else self.settings.trading_mode.value
         row = {
             "Entry time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -957,6 +960,7 @@ class SignalEngine:
             "Sweep price": sweep,
             "Breakout price": breakout,
             "Entry type": entry_type,
+            "Retest time": retest_time,
             "Entry price": price,
             "Stop": signal.stop_loss,
             "Target": signal.take_profit,

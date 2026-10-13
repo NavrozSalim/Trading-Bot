@@ -1005,3 +1005,36 @@ async def test_a_single_candle_breakout_is_written_to_excel_with_that_reason(set
     sheet = openpyxl.load_workbook(book).active
     assert sheet["E2"].value == "INVALID"
     assert sheet["F2"].value == "SETUP INVALID BECAUSE SINGLE CANDLE BREAKOUT 17:50"
+
+
+@pytest.mark.asyncio
+async def test_a_retest_fill_is_written_with_the_chart_clock(settings, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class ChartClock(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return datetime(2026, 10, 13, 11, 52, 8, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("trading_bot.trading.engine.datetime", ChartClock)
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    engine, db = _engine(settings, BlankChart())
+    await db.start()
+    signal = Signal(
+        signal=SignalType.BUY,
+        reason="retest_touch",
+        symbol="XAUUSD",
+        timeframe="1M",
+        candle_timestamp="2026-10-13T12:05",
+        price=4185.334,
+        stop_loss=4181.347,
+        take_profit=4190.347,
+        extra={"setup_clock": "17:05", "retest_level": "4185.305"},
+    )
+    await engine._record_excel_open(signal, 4185.334, 0.06, 749.68, ticket="2041")
+    await db.close()
+    book = settings.logs_dir.parent / "data" / "trades.xlsx"
+    import openpyxl
+
+    sheet = openpyxl.load_workbook(book).active
+    assert sheet["K2"].value == "retest touch"
+    assert sheet["L2"].value == "16:52:08"
