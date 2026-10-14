@@ -127,14 +127,30 @@ def range_from_samples(pixels: np.ndarray) -> HsvRange | None:
     usable = pixels[pixels[:, 1] > 40]
     if len(usable) < 8:
         return None
+    mid_hue = int(np.median(usable[:, 0].astype(int)))
+    if mid_hue >= 100:
+        band = usable[usable[:, 0] >= 100]
+        if len(band) >= 8:
+            usable = band
+    elif 15 <= mid_hue <= 42:
+        band = usable[(usable[:, 0] >= 15) & (usable[:, 0] <= 42)]
+        if len(band) >= 8:
+            usable = band
     hue = np.sort(usable[:, 0].astype(int))
     sat = np.sort(usable[:, 1].astype(int))
     val = np.sort(usable[:, 2].astype(int))
     low = max(0, len(usable) // 20)
     high = max(low + 1, len(usable) - low - 1)
+    h_min = max(0, int(hue[low]) - 6)
+    h_max = min(179, int(hue[high]) + 6)
+    if mid_hue >= 100:
+        h_min = max(100, h_min)
+    elif 15 <= mid_hue <= 42:
+        h_min = max(15, h_min)
+        h_max = min(42, h_max)
     return HsvRange(
-        h_min=max(0, int(hue[low]) - 6),
-        h_max=min(179, int(hue[high]) + 6),
+        h_min=h_min,
+        h_max=h_max,
         s_min=max(20, int(sat[low]) - 40),
         s_max=255,
         v_min=max(20, int(val[low]) - 40),
@@ -158,15 +174,16 @@ def colors_from_bgr(image: np.ndarray, vision: ChartVision, count: int) -> list[
     bottom = int(height * 0.92)
     if bottom <= top:
         return [""] * count
-    ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 3
-    runs = _candle_runs(ink)
+    ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 2
+    runs, forming_clipped = _candle_runs(ink)
     if len(runs) < 2:
         return [""] * count
     pitch = _candle_pitch(runs)
-    forming_center = (runs[-1][0] + runs[-1][1]) / 2.0
+    forming_center = _forming_center(runs, pitch, forming_clipped)
     labels = [""] * count
     distance = [1.0] * count
-    for start, end in runs[:-1]:
+    closed_runs = runs if forming_clipped else runs[:-1]
+    for start, end in closed_runs:
         center = (start + end) / 2.0
         minutes = (forming_center - center) / pitch
         slot_from_right = int(np.floor(minutes + 0.5))
@@ -184,12 +201,25 @@ def colors_from_bgr(image: np.ndarray, vision: ChartVision, count: int) -> list[
     return labels
 
 
-def _candle_runs(ink: np.ndarray) -> list[tuple[int, int]]:
-    """Candle bodies, with the price-scale letters on the right removed."""
+def _candle_runs(ink: np.ndarray) -> tuple[list[tuple[int, int]], bool]:
+    """Candle bodies, and whether the newest candle was clipped off the right edge."""
     runs = _ink_runs(ink)
     runs = _cut_price_scale(runs)
-    runs = _drop_right_outlier(runs)
-    return _drop_wide_runs(runs)
+    runs, forming_clipped = _drop_right_outlier(runs, len(ink))
+    return _drop_wide_runs(runs), forming_clipped
+
+
+def _forming_center(runs: list[tuple[int, int]], pitch: float, forming_clipped: bool) -> float:
+    """Pixel center of the candle that is still forming.
+
+    A clipped sliver is only the left edge of that candle. Its real center is
+    one minute to the right of the last full candle, so the full candle keeps
+    the minute it closed on.
+    """
+    last = (runs[-1][0] + runs[-1][1]) / 2.0
+    if forming_clipped:
+        return last + pitch
+    return last
 
 
 def _ink_runs(ink: np.ndarray) -> list[tuple[int, int]]:
@@ -232,10 +262,16 @@ def _cut_price_scale(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return runs[: cut + 1]
 
 
-def _drop_right_outlier(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Drop one odd blob that sits to the right of the last candle."""
+def _drop_right_outlier(
+    runs: list[tuple[int, int]], width: int = 0
+) -> tuple[list[tuple[int, int]], bool]:
+    """Drop one odd blob or clipped sliver that sits to the right of the last full candle.
+
+    The second value is true when that sliver was the new candle cut off by the
+    edge. The last full candle then stays one minute back.
+    """
     if len(runs) < 3:
-        return runs
+        return runs, False
     centers = [(start + end) / 2.0 for start, end in runs]
     gaps = [centers[index + 1] - centers[index] for index in range(len(centers) - 1)]
     typical = float(np.median(gaps[:-1]))
@@ -245,8 +281,11 @@ def _drop_right_outlier(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
         last_width > median_width * 2.2 or last_width < median_width * 0.7
     )
     if typical > 0 and gaps[-1] > typical * 1.6 and odd_width:
-        return runs[:-1]
-    return runs
+        return runs[:-1], False
+    at_right_edge = width > 0 and runs[-1][1] >= width - 2
+    if at_right_edge and median_width > 0 and last_width < median_width * 0.75:
+        return runs[:-1], True
+    return runs, False
 
 
 def _drop_wide_runs(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -289,6 +328,11 @@ def _prefer_label(current: str, new: str, current_distance: float, new_distance:
     return new_distance < current_distance
 
 
+def _is_standard_candle_hue(hue: int) -> bool:
+    """Standard TradingView red and teal-green candle hues are never yellow or blue paint."""
+    return hue <= 12 or hue >= 168 or 42 <= hue <= 96
+
+
 def _label_bar(
     hsv: np.ndarray,
     top: int,
@@ -302,9 +346,12 @@ def _label_bar(
         return ""
     yellow = blue = 0
     for hue, sat, val in body:
-        if vision.yellow.contains(int(hue), int(sat), int(val)):
+        hue_i = int(hue)
+        if _is_standard_candle_hue(hue_i):
+            continue
+        if vision.yellow.contains(hue_i, int(sat), int(val)):
             yellow += 1
-        elif vision.blue.contains(int(hue), int(sat), int(val)):
+        elif vision.blue.contains(hue_i, int(sat), int(val)):
             blue += 1
     total = len(body)
     if yellow >= blue and yellow / total >= vision.min_confidence:
@@ -336,6 +383,7 @@ class ColorMemory:
     def __init__(self) -> None:
         self.confirmed: dict[str, str] = {}
         self._seen_once: dict[str, str] = {}
+        self._plain: dict[str, int] = {}
 
     def apply(self, timestamps: list[str], fresh: list[str] | None) -> list[str] | None:
         if fresh is None:
@@ -343,21 +391,27 @@ class ColorMemory:
         alive = set(timestamps)
         self.confirmed = {ts: color for ts, color in self.confirmed.items() if ts in alive}
         self._seen_once = {ts: color for ts, color in self._seen_once.items() if ts in alive}
+        self._plain = {ts: count for ts, count in self._plain.items() if ts in alive}
         reading = list(fresh)
         if len(reading) < len(timestamps):
             reading = [""] * (len(timestamps) - len(reading)) + reading
         elif len(reading) > len(timestamps):
             reading = reading[-len(timestamps) :]
+        newest = timestamps[-1] if timestamps else ""
         held: list[str] = []
         for ts, seen in zip(timestamps, reading, strict=True):
             if seen in ("yellow", "blue"):
-                if self.confirmed.get(ts) == seen or self._seen_once.get(ts) == seen:
+                if self._plain.get(ts, 0) >= 2 and ts not in self.confirmed:
+                    self._seen_once.pop(ts, None)
+                elif self.confirmed.get(ts) == seen or self._seen_once.get(ts) == seen:
                     self.confirmed[ts] = seen
                     self._seen_once.pop(ts, None)
                 else:
                     self._seen_once[ts] = seen
             else:
                 self._seen_once.pop(ts, None)
+                if ts not in self.confirmed and ts != newest:
+                    self._plain[ts] = self._plain.get(ts, 0) + 1
             held.append(self.confirmed.get(ts, ""))
         log.info(
             "kkc_colors_held",
@@ -518,7 +572,7 @@ def _newest_candle_point(image: np.ndarray, vision: ChartVision) -> tuple[int, i
     if bottom <= top:
         return None
     ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 3
-    runs = _candle_runs(ink)
+    runs, _forming_clipped = _candle_runs(ink)
     if len(runs) < 2:
         return None
     start, end = runs[-1]

@@ -170,3 +170,49 @@ def test_sample_range_covers_the_sampled_yellow() -> None:
     found = range_from_samples(hsv.reshape(-1, 3))
     assert found is not None
     assert found.contains(28, 180, 210)
+
+
+def test_green_candle_is_never_labeled_blue_even_with_wide_blue_range() -> None:
+    wide_blue = ChartVision(
+        x=0,
+        y=0,
+        width=80,
+        height=40,
+        yellow=HsvRange(15, 40, 80, 255, 120, 255),
+        blue=HsvRange(79, 118, 174, 255, 113, 255),
+        min_confidence=0.55,
+        calibrated=True,
+    )
+    image = np.full((40, 80, 3), 255, dtype=np.uint8)
+    image[8:28, 4:12] = _bgr(85, 8)
+    image[8:28, 24:32] = _bgr(112, 8)
+    image[8:28, 60:70] = _bgr(0, 10)
+    colors = colors_from_bgr(image, wide_blue, 2)
+    assert colors == ["", "blue"]
+
+
+def test_blue_calibration_samples_ignore_stray_green_pixels() -> None:
+    blue_pixels = np.full((90, 3), (112, 214, 255), dtype=np.uint8)
+    green_pixels = np.full((10, 3), (85, 242, 153), dtype=np.uint8)
+    found = range_from_samples(np.vstack([blue_pixels, green_pixels]))
+    assert found is not None
+    assert found.h_min >= 100
+    assert not found.contains(85, 242, 153)
+    assert found.contains(112, 214, 255)
+
+
+def test_clipped_right_edge_sliver_keeps_the_blue_on_its_minute() -> None:
+    hues: list[int | None] = [115, 0, 0, 0]
+    image = _regular_chart(hues, pitch=20, body=10, extra_right=6)
+    _paint(image, 0, image.shape[1] - 3, image.shape[1])
+    colors = colors_from_bgr(image, _vision(), 4)
+    assert colors == ["blue", "", "", ""]
+
+
+def test_closed_plain_candle_cannot_turn_blue_after_later_slip() -> None:
+    memory = ColorMemory()
+    assert memory.apply(["15:07", "15:08"], ["", ""]) == ["", ""]
+    assert memory.apply(["15:07", "15:08", "15:09"], ["", "", "blue"]) == ["", "", ""]
+    assert memory.apply(["15:07", "15:08", "15:09"], ["blue", "", "blue"]) == ["", "", "blue"]
+    assert memory.apply(["15:07", "15:08", "15:09"], ["blue", "", "blue"]) == ["", "", "blue"]
+

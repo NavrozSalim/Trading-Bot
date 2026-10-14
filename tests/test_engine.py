@@ -860,8 +860,24 @@ async def test_a_one_minute_clock_slide_does_not_copy_the_blue(settings, capsys)
     assert list(engine._color_memory.confirmed) == [str(mt5[15].timestamp)]
 
 
+def test_a_shaky_one_minute_lineup_keeps_the_chart_minute() -> None:
+    import random
+    from datetime import timedelta
+
+    rng = random.Random(7)
+    sides = [rng.random() < 0.5 for _ in range(40)]
+    history = [_sided(minute, green) for minute, green in enumerate(sides)]
+    picture = []
+    for minute in range(39):
+        green = sides[minute + 1]
+        if minute < 10:
+            green = not green
+        picture.append(_sided(minute, green))
+    assert SignalEngine._chart_shift(picture, history, history) == timedelta(0)
+
+
 @pytest.mark.asyncio
-async def test_a_one_minute_clock_slide_does_not_paint_a_yellow(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+async def test_a_one_minute_clock_slide_puts_the_yellow_on_the_real_minute(settings, capsys) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"
     import random
@@ -898,9 +914,10 @@ async def test_a_one_minute_clock_slide_does_not_paint_a_yellow(settings, capsys
         await engine.poll_once()
     text = capsys.readouterr().out
     await db.close()
-    assert engine._color_memory.confirmed == {}
-    assert "Clock moved" in text
-    assert "closed on TradingView" in text
+    assert list(engine._color_memory.confirmed) == [str(mt5[15].timestamp)]
+    assert list(engine._color_memory.confirmed.values()) == ["yellow"]
+    assert "Yellow: 17:15" in text
+    assert "counted when that 1-minute candle has closed" not in text
     assert "YELLOW DETECTED" not in text
 
 
@@ -1038,3 +1055,31 @@ async def test_a_retest_fill_is_written_with_the_chart_clock(settings, monkeypat
     sheet = openpyxl.load_workbook(book).active
     assert sheet["K2"].value == "retest touch"
     assert sheet["L2"].value == "16:52:08"
+
+
+@pytest.mark.asyncio
+async def test_a_picture_missing_all_green_candles_does_not_match_mt5(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    mt5 = [_sided(minute, minute % 2 == 0) for minute in range(45)]
+    picture = [
+        _c(minute, 10.0, 10.2, 9.8, 10.0) if minute % 2 == 0 else _sided(minute, False)
+        for minute in range(45)
+    ]
+    colors = ["blue" if minute % 2 == 0 else "" for minute in range(45)]
+    forming = Candle(
+        timestamp=datetime(2026, 9, 23, 12, 45, tzinfo=timezone.utc),
+        open=10.0,
+        high=10.1,
+        low=9.9,
+        close=10.0,
+        is_closed=False,
+    )
+    reader = ChartReader(ChartMarket(picture, forming, colors, fresh_colors=list(colors)))
+    engine, db = _engine(settings, reader, [mt5])
+    await db.start()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert "CHART DOES NOT MATCH MT5" in text
+

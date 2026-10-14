@@ -59,7 +59,25 @@ def test_price_text_keeps_the_comma_and_the_decimals() -> None:
     assert _parse_price("4,122.325") == 4122.325
     assert _parse_price("4.122.325") == 4122.325
     assert _parse_price("4122.50") == 4122.5
+    assert _parse_price("4,146.") == 4146.0
+    assert _parse_price("4,145,") == 4145.0
     assert _parse_price("12") is None
+
+
+def test_axis_numbers_with_trailing_dot_or_comma_still_repair() -> None:
+    from trading_bot.market.chart_prices import _repair_axis
+
+    labels = _repair_axis(
+        [
+            (20, "4,146."),
+            (60, "4,145,"),
+            (100, "4,144."),
+            (140, "4,143."),
+            (180, "4,142,"),
+        ]
+    )
+    prices = sorted(price for _y, price in labels)
+    assert prices == [4142.0, 4143.0, 4144.0, 4145.0, 4146.0]
 
 
 def test_axis_numbers_are_read_back() -> None:

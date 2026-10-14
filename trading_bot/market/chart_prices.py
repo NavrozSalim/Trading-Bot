@@ -22,6 +22,7 @@ from trading_bot.market.kkc_vision import (
     ChartVision,
     _candle_pitch,
     _candle_runs,
+    _forming_center,
     _label_bar,
 )
 from trading_bot.monitoring.logger import get_logger
@@ -60,7 +61,7 @@ def market_from_bgr(
     if ink is None:
         _fail("chart picture is too small")
         return None
-    runs = _candle_runs(ink)
+    runs, forming_clipped = _candle_runs(ink)
     if len(runs) < 6:
         _fail("not enough candles on the chart")
         return None
@@ -69,7 +70,7 @@ def market_from_bgr(
     slope, intercept = scale if scale is not None else (-1.0, float(hsv.shape[0]))
     clipped = _wicks_touch_edge(hsv, runs)
     pitch = _candle_pitch(runs)
-    forming_center = (runs[-1][0] + runs[-1][1]) / 2.0
+    forming_center = _forming_center(runs, pitch, forming_clipped)
     minute = _local_minute(now)
     closed_by_slot: dict[int, tuple[Candle, str, float]] = {}
     forming: Candle | None = None
@@ -79,7 +80,7 @@ def market_from_bgr(
         minutes = (forming_center - center) / pitch
         slot = int(np.floor(minutes + 0.5))
         distance = abs(minutes - slot)
-        if (start, end) == runs[-1]:
+        if not forming_clipped and (start, end) == runs[-1]:
             slot = 0
             distance = 0.0
         elif slot < 1 or distance > 0.45:
@@ -103,6 +104,16 @@ def market_from_bgr(
         if previous is not None and previous[2] <= distance:
             continue
         closed_by_slot[slot] = (candle, bar[4], distance)
+    if forming is None and forming_clipped and closed_by_slot:
+        newest = closed_by_slot[min(closed_by_slot)][0]
+        forming = Candle(
+            timestamp=minute,
+            open=newest.close,
+            high=newest.close,
+            low=newest.close,
+            close=newest.close,
+            is_closed=False,
+        )
     if forming is None or len(closed_by_slot) < 5:
         _fail("the chart candles could not be priced")
         return None
@@ -139,7 +150,8 @@ def candle_run_count(image: np.ndarray) -> int:
     ink = _column_ink(hsv)
     if ink is None:
         return 0
-    return len(_candle_runs(ink))
+    runs, _forming_clipped = _candle_runs(ink)
+    return len(runs)
 
 
 def zoom_action(candle_count: int, price_span: float | None) -> str | None:
@@ -187,7 +199,7 @@ def _column_ink(hsv: np.ndarray) -> np.ndarray | None:
     bottom = int(height * 0.92)
     if bottom <= top:
         return None
-    return np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 3
+    return np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 2
 
 
 def _bar_ohlc(
@@ -403,6 +415,8 @@ def _axis_parts(text: str) -> tuple[str, str] | None:
     if len(parts) == 1:
         return parts[0], ""
     if len(parts) == 2:
+        if len(parts[0]) < 3:
+            return parts[0] + parts[1], ""
         return parts[0], parts[1]
     if len(parts) == 3 and len(parts[1]) == 3:
         return parts[0] + parts[1], parts[2]
@@ -592,6 +606,8 @@ def _parse_price(text: str) -> float | None:
         return None
     if len(parts) == 1:
         whole, frac = parts[0], ""
+    elif len(parts) == 2 and len(parts[0]) < 3 and len(parts[1]) == 3:
+        whole, frac = parts[0] + parts[1], ""
     elif len(parts) == 2:
         whole, frac = parts
     elif len(parts) == 3 and len(parts[1]) == 3:

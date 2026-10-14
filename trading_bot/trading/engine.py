@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trading_bot.config import Settings
@@ -225,8 +225,15 @@ class SignalEngine:
 
     @staticmethod
     def _clock_moved(shift_minutes: int) -> bool:
-        """A small clock slide. A chart scrolled well back from the live edge is not this."""
-        return shift_minutes != 0 and shift_minutes >= -5
+        """A clock slide of more than one minute. One minute keeps the chart's own minute.
+
+        A chart scrolled well back from the live edge is not this.
+        """
+        if shift_minutes == 0 or shift_minutes < -5:
+            return False
+        if abs(shift_minutes) == 1:
+            return False
+        return True
 
     def _held_colors(self, candles: list) -> list[str]:
         """Colors already counted on a closed candle. This picture does not add one."""
@@ -243,19 +250,40 @@ class SignalEngine:
     @staticmethod
     def _chart_shift(chart_candles: list, history: list, candles: list):
         """Minutes that move the picture onto MT5's bars. None if the picture is not MT5's chart."""
-        sided = sum(1 for candle in chart_candles if candle.close != candle.open)
+        reds = sum(1 for candle in chart_candles if candle.close < candle.open)
+        greens = sum(1 for candle in chart_candles if candle.close > candle.open)
+        sided = reds + greens
         if sided < _MATCH_MIN_VOTES:
             return chart_offset(chart_candles, candles)
         shift, agree, votes = chart_match(chart_candles, history, _MATCH_REACH)
-        if votes < _MATCH_MIN_VOTES or agree < votes * _MATCH_MIN_AGREE:
-            log.info(
-                "chart_does_not_match_mt5",
-                agree=agree,
-                votes=votes,
-                minutes=int(shift.total_seconds() // 60),
-            )
-            return None
-        return shift
+        minutes = int(shift.total_seconds() // 60)
+        min_votes = (
+            max(_MATCH_MIN_VOTES, len(chart_candles) // 2)
+            if len(chart_candles) >= 20
+            else _MATCH_MIN_VOTES
+        )
+        missing_side = len(chart_candles) >= 20 and (reds == 0 or greens == 0)
+        lined_up = not missing_side and votes >= min_votes and agree >= votes * _MATCH_MIN_AGREE
+        if lined_up:
+            return shift
+        # 29 of 39 is the live chart one minute off. Keep the picture's own minutes.
+        one_minute = (
+            not missing_side
+            and abs(minutes) == 1
+            and votes >= min_votes
+            and votes > 0
+            and agree * 100 >= votes * 74
+        )
+        if one_minute:
+            log.info("chart_one_minute_kept", agree=agree, votes=votes, minutes=minutes)
+            return timedelta(0)
+        log.info(
+            "chart_does_not_match_mt5",
+            agree=agree,
+            votes=votes,
+            minutes=minutes,
+        )
+        return None
 
     def _drop_old_paint(self, candles: list, colors: list[str] | None) -> list[str] | None:
         """A yellow or blue already on the chart at startup is old. It is not shown or traded."""
@@ -398,7 +426,7 @@ class SignalEngine:
             return
         if fresh_colors is not None:
             self._note_fresh_colors(fresh_colors)
-        if await self._try_retest_entry(forming, symbol):
+        if not paint_waits and await self._try_retest_entry(forming, symbol):
             return
         if self._last_closed_ts is None:
             self._last_closed_ts = last_ts
@@ -412,7 +440,7 @@ class SignalEngine:
                 trade_action="NO_TRADE",
             )
             return
-        if last_ts == self._last_closed_ts:
+        if paint_waits or last_ts == self._last_closed_ts:
             await self._review_same_candle(candles, symbol, price, chart_colors)
             return
         self._last_closed_ts = last_ts
