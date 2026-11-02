@@ -556,6 +556,56 @@ async def test_a_frozen_picture_reloads_the_chart_and_does_not_zoom(settings, ca
 
 
 @pytest.mark.asyncio
+async def test_few_candles_do_not_reload_the_chart(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    closed = [_c(minute % 60, 10.0, 11.0, 9.0, 10.2) for minute in range(12)]
+    reader = ChartReader(ChartMarket(closed, _forming_at_one(), [""] * 12, price_span=40))
+    engine, db = _engine(settings, reader)
+    reloads: list[int] = []
+
+    async def reload() -> None:
+        reloads.append(1)
+
+    engine.refresh_chart = reload
+    await db.start()
+    await engine.poll_once()
+    await engine.poll_once()
+    capsys.readouterr()
+    await db.close()
+    assert reloads == []
+
+
+@pytest.mark.asyncio
+async def test_a_candle_still_cut_off_reloads_the_chart(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    reader = ChartReader(ChartMarket([], _forming_at_one(), [], price_span=40, clipped=True))
+    reader.forgotten = 0
+
+    def forget_picture() -> None:
+        reader.forgotten += 1
+
+    reader.forget_picture = forget_picture  # type: ignore[method-assign]
+    engine, db = _engine(settings, reader)
+    reloads: list[int] = []
+
+    async def reload() -> None:
+        reloads.append(1)
+
+    engine.refresh_chart = reload
+    await db.start()
+    await engine.poll_once()
+    await engine.poll_once()
+    text = capsys.readouterr().out
+    await db.close()
+    assert reloads == [1]
+    assert reader.forgotten == 1
+    assert "CHART RELOADED" in text
+    assert "would send" not in text
+
+
+@pytest.mark.asyncio
 async def test_a_cut_off_candle_does_not_trade(settings, capsys) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"

@@ -39,7 +39,7 @@ log = get_logger("trading_bot.engine")
 _BARS = 80
 _MATCH_REACH = 180
 _FROZEN_SECONDS = 120
-_RELOAD_EVERY_SECONDS = 300
+_RELOAD_EVERY_SECONDS = 120
 _MATCH_MIN_VOTES = 8
 _MATCH_MIN_AGREE = 0.75
 _OWN_MINUTE_REACH = 2
@@ -403,8 +403,9 @@ class SignalEngine:
                     return
                 if market.clipped:
                     fit = getattr(self.color_reader, "fit_price_scale", None)
-                    if fit is not None:
-                        await fit()
+                    fitted = fit is not None and await fit()
+                    if not fitted and await self._reload_for_chart(symbol, "spike"):
+                        return
                     await self._log_cut_off_candle(symbol)
                     return
             history = await asyncio.to_thread(
@@ -776,26 +777,57 @@ class SignalEngine:
         return True
 
     async def _chart_frozen(self, symbol: str) -> bool:
-        """The same picture for two minutes means TradingView stopped drawing. Zooming cannot fix that."""
+        """The same picture for two minutes means the chart stopped drawing, often after a spike."""
         still = float(getattr(self.color_reader, "unchanged_seconds", 0.0) or 0.0)
         if still < _FROZEN_SECONDS:
             return False
-        reloaded = False
-        now = time.monotonic()
-        if self.refresh_chart is not None and now - self._last_refresh >= _RELOAD_EVERY_SECONDS:
-            self._last_refresh = now
-            try:
-                await self.refresh_chart()
-                reloaded = True
-                log.info("chart_page_reloaded", frozen_seconds=int(still))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("chart_reload_failed", error=str(exc))
+        if await self._reload_for_chart(symbol, "frozen"):
+            return True
         await self._log_unreadable_chart(
             symbol,
             f"CHART PICTURE IS FROZEN — the TradingView picture has not changed for {int(still // 60)} "
-            "minutes (window covered, minimized, or the page stopped updating). "
-            + ("The chart page was reloaded. " if reloaded else "")
-            + "No trade on this check.",
+            "minutes (window covered, minimized, or a price spike pinned the candles off the chart). "
+            "No trade on this check.",
+        )
+        return True
+
+    async def _reload_for_chart(self, symbol: str, why: str) -> bool:
+        """Reload TradingView now and forget the stuck picture so the next check can trade."""
+        if self.refresh_chart is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_refresh < _RELOAD_EVERY_SECONDS:
+            return False
+        self._last_refresh = now
+        try:
+            await self.refresh_chart()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_reload_failed", error=str(exc))
+            return False
+        forget = getattr(self.color_reader, "forget_picture", None)
+        if callable(forget):
+            forget()
+        log.info("chart_page_reloaded", reason=why)
+        if why == "frozen":
+            reason = (
+                "CHART PICTURE IS FROZEN — the TradingView picture has not changed for 2 minutes "
+                "(a price spike can pin the candles off the chart). The chart page was reloaded. "
+                "The next check reads the chart again. No trade on this check."
+            )
+        else:
+            reason = (
+                "CHART RELOADED — a candle stayed cut off after the price scale reset, so the page "
+                "was reloaded. "
+                "The next check reads the chart again. No trade on this check."
+            )
+        account = await self._account_view()
+        self._say(
+            symbol=symbol,
+            timeframe=self.settings.timeframe,
+            signal="NO_TRADE",
+            signal_reason=reason,
+            trade_action="NO_TRADE",
+            **account,
         )
         return True
 
