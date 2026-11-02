@@ -196,8 +196,8 @@ class TradingBot:
                 log.exception("engine_loop_error", error=str(exc))
                 ctx.health.update(last_error=str(exc))
             try:
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=ctx.settings.candle_poll_seconds
+                await ctx.engine.watch_retest(
+                    ctx.settings.candle_poll_seconds, stop_event=self._stop
                 )
-            except TimeoutError:
-                continue
+            except Exception as exc:  # noqa: BLE001
+                log.exception("retest_watch_error", error=str(exc))

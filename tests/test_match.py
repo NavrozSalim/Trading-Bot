@@ -69,6 +69,29 @@ def test_a_picture_of_something_else_does_not_match() -> None:
     assert agree < votes * 0.75
 
 
+def test_small_candle_bodies_do_not_slide_the_clock() -> None:
+    """Ten-point bodies that match the previous minute must not move a correct chart."""
+    from trading_bot.market.candle_reader import Candle
+    from trading_bot.market.match import chart_offset
+
+    pattern = _mixed(40, 3)
+    start = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+    bars = [_bar(start + timedelta(minutes=i), g) for i, g in enumerate(pattern)]
+    chart = []
+    for i, green in enumerate(pattern):
+        stamp = (start + timedelta(minutes=i)).astimezone(_CHART)
+        if i % 4 == 0:
+            # Tiny body, colored like the previous candle. These used to pull the clock back.
+            previous = pattern[i - 1] if i else green
+            open_, close = (10.00, 10.05) if previous else (10.05, 10.00)
+            chart.append(
+                Candle(timestamp=stamp, open=open_, high=10.2, low=9.8, close=close, is_closed=True)
+            )
+        else:
+            chart.append(_bar(stamp, green))
+    assert chart_offset(chart, bars) == timedelta(0)
+
+
 def test_a_skipped_doji_does_not_move_the_yellow() -> None:
     # Chart 17:49 yellow. The picture skipped 17:52 and 17:54.
     chart_minutes = [47, 48, 49, 50, 51, 53, 55, 56, 57, 58]

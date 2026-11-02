@@ -66,10 +66,11 @@ class Settings(BaseSettings):
 
     # --- Risk (consumed from Phase 7 onward; validated here so config is ready) ---
     risk_per_trade_pct: float = Field(default=1.0, ge=0)
+    risk_per_trade_amount: float = Field(default=0.0, ge=0)  # fixed dollars at the stop, including the 0.80. 0 uses the percent
     max_position_size: float = Field(default=0.01, ge=0)
     max_open_trades: int = Field(default=1, ge=0)
-    max_trades_per_day: int = Field(default=5, ge=0)
-    max_daily_loss: float = Field(default=100.0, ge=0)
+    max_trades_per_day: int = Field(default=5, ge=0)  # 0 means no daily trade cap
+    max_daily_loss: float = Field(default=100.0, ge=0)  # 0 means no daily loss cap
     max_consecutive_losses: int = Field(default=3, ge=0)
     sl_offset: float = Field(default=0.80, ge=0)
     tp_rr: float = Field(default=0.0, ge=0)

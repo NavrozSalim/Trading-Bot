@@ -37,7 +37,7 @@ BUY_PATTERN = [
     _c(2, 9.50, 9.70, 9.20, 9.55),
     _c(3, 9.55, 9.65, 9.00, 9.60),
     _c(4, 9.40, 9.60, 9.30, 9.55),
-    _c(5, 9.50, 10.20, 9.40, 9.85),
+    _c(5, 9.40, 10.38, 9.30, 10.35),
 ]
 
 
@@ -252,7 +252,7 @@ async def test_a_remembered_blue_does_not_sell_when_the_picture_has_no_blue(sett
         _c(2, 10.30, 10.90, 10.20, 10.25),
         _c(3, 10.25, 11.20, 10.15, 10.40),
         _c(4, 10.40, 10.45, 10.20, 10.22),
-        _c(5, 10.22, 10.24, 10.05, 10.10),
+        _c(5, 10.25, 10.30, 9.22, 9.25),
     ]
     forming = Candle(
         timestamp=datetime(2026, 9, 23, 12, 6, tzinfo=timezone.utc),
@@ -651,6 +651,7 @@ async def test_retest_fires_only_when_the_live_price_is_on_the_level(settings) -
         database=db,
     )
     engine._pending = _pending_buy()
+    engine._utc_now = lambda: datetime(2026, 9, 22, 22, 50, tzinfo=timezone.utc)
     terminal.bid = 9.30
     terminal.ask = 9.34
     away = Candle(
@@ -670,12 +671,52 @@ async def test_retest_fires_only_when_the_live_price_is_on_the_level(settings) -
 
 
 @pytest.mark.asyncio
+async def test_a_retest_before_3_50_chart_time_waits(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    db = Database(settings)
+    await db.start()
+    executor = FakeExecutor()
+    terminal = FakeTerminal([BUY_PATTERN])
+    engine = SignalEngine(
+        settings,
+        strategy=SweepBreakoutStrategy(sl_offset=0.80),
+        executor=executor,
+        terminal=terminal,  # type: ignore[arg-type]
+        risk=RiskManager(settings),
+        duplicates=DuplicateProtection(),
+        positions=PositionManager(executor, KillSwitch()),
+        kill_switch=KillSwitch(),
+        health=HealthMonitor(),
+        database=db,
+    )
+    engine._pending = _pending_buy()
+    terminal.bid = 9.70
+    terminal.ask = 9.74
+    touch = Candle(
+        timestamp=datetime(2026, 9, 23, 12, 7, tzinfo=timezone.utc),
+        open=9.6,
+        high=9.9,
+        low=9.5,
+        close=9.8,
+        is_closed=False,
+    )
+    engine._utc_now = lambda: datetime(2026, 9, 22, 22, 49, tzinfo=timezone.utc)
+    assert await engine._try_retest_entry(touch, "XAUUSD") is False
+    assert engine._pending is not None
+    engine._utc_now = lambda: datetime(2026, 9, 22, 22, 50, tzinfo=timezone.utc)
+    assert await engine._try_retest_entry(touch, "XAUUSD") is True
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_the_retest_cancels_at_one_point_eight_not_at_the_target(settings) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"
     engine, db = _engine(settings, None, [BUY_PATTERN])
     engine.terminal.bid = 9.70  # type: ignore[attr-defined]
     engine.terminal.ask = 9.74  # type: ignore[attr-defined]
+    engine._utc_now = lambda: datetime(2026, 9, 22, 22, 50, tzinfo=timezone.utc)
     await db.start()
 
     def pending() -> Signal:
@@ -860,6 +901,20 @@ async def test_a_one_minute_clock_slide_does_not_copy_the_blue(settings, capsys)
     assert list(engine._color_memory.confirmed) == [str(mt5[15].timestamp)]
 
 
+def test_a_live_chart_with_a_few_different_candles_is_kept() -> None:
+    """35 of 47 agreeing at the same minute is still the live gold chart."""
+    import random
+    from datetime import timedelta
+
+    rng = random.Random(11)
+    sides = [rng.random() < 0.5 for _ in range(47)]
+    history = [_sided(minute, green) for minute, green in enumerate(sides)]
+    picture = [_sided(minute, green) for minute, green in enumerate(sides)]
+    for minute in rng.sample(range(47), 12):
+        picture[minute] = _sided(minute, not sides[minute])
+    assert SignalEngine._chart_shift(picture, history, history) == timedelta(0)
+
+
 def test_a_shaky_one_minute_lineup_keeps_the_chart_minute() -> None:
     import random
     from datetime import timedelta
@@ -876,15 +931,28 @@ def test_a_shaky_one_minute_lineup_keeps_the_chart_minute() -> None:
     assert SignalEngine._chart_shift(picture, history, history) == timedelta(0)
 
 
+def test_a_run_of_reds_keeps_the_picture_minute() -> None:
+    from datetime import timedelta
+
+    sides = [True, False, True, True, False, True, False, False, True, False, True, True]
+    sides += [False] * 14 + [True, False, True, False]
+    history = [_sided(minute, green) for minute, green in enumerate(sides)]
+    picture = [_sided(minute, green) for minute, green in enumerate(sides)]
+    picture[2] = _sided(2, False)
+    picture[5] = _sided(5, False)
+    picture[9] = _sided(9, True)
+    picture[27] = _sided(27, True)
+    picture[28] = _sided(28, False)
+    assert SignalEngine._chart_shift(picture, history, history) == timedelta(0)
+
+
 @pytest.mark.asyncio
 async def test_a_one_minute_clock_slide_puts_the_yellow_on_the_real_minute(settings, capsys) -> None:  # type: ignore[no-untyped-def]
     settings.dry_run = True
     settings.mt5_symbol = "XAUUSD"
-    import random
     from datetime import timedelta
 
-    rng = random.Random(5)
-    sides = [rng.random() < 0.5 for _ in range(20)]
+    sides = [index % 2 == 0 for index in range(20)]
     mt5 = [_sided(minute, green) for minute, green in enumerate(sides)]
     colors = [""] * 20
     colors[15] = "yellow"
@@ -1082,4 +1150,76 @@ async def test_a_picture_missing_all_green_candles_does_not_match_mt5(settings, 
     text = capsys.readouterr().out
     await db.close()
     assert "CHART DOES NOT MATCH MT5" in text
+
+
+@pytest.mark.asyncio
+async def test_watch_retest_catches_a_fast_tick_between_screenshots(settings, capsys) -> None:  # type: ignore[no-untyped-def]
+    settings.dry_run = True
+    settings.mt5_symbol = "XAUUSD"
+    settings.max_position_size = 1.0
+    settings.risk_per_trade_pct = 2.0
+
+    class FastTickTerminal(FakeTerminal):
+        def __init__(self) -> None:
+            super().__init__([BUY_PATTERN])
+            self.quotes = [
+                (4078.287, 4078.327),
+                (4078.582, 4078.622),
+                (4079.092, 4079.132),
+            ]
+
+        def tick(self, symbol: str) -> SimpleNamespace | None:
+            bid, ask = self.quotes.pop(0) if len(self.quotes) > 1 else self.quotes[0]
+            return SimpleNamespace(bid=bid, ask=ask)
+
+        def forming_candle(self, symbol: str, timeframe: str) -> Candle:
+            return Candle(
+                timestamp=datetime(2026, 10, 14, 16, 32, tzinfo=timezone.utc),
+                open=4076.116,
+                high=4079.631,
+                low=4076.058,
+                close=4078.600,
+                is_closed=False,
+            )
+
+    db = Database(settings)
+    await db.start()
+    executor = FakeExecutor()
+    terminal = FastTickTerminal()
+    engine = SignalEngine(
+        settings,
+        strategy=SweepBreakoutStrategy(sl_offset=0.80),
+        executor=executor,
+        terminal=terminal,  # type: ignore[arg-type]
+        risk=RiskManager(settings),
+        duplicates=DuplicateProtection(),
+        positions=PositionManager(executor, KillSwitch()),
+        kill_switch=KillSwitch(),
+        health=HealthMonitor(),
+        database=db,
+    )
+    engine._pending = Signal(
+        signal=SignalType.NO_TRADE,
+        reason="await_blue_retest",
+        symbol="XAUUSD",
+        timeframe="1M",
+        candle_timestamp="2026-10-14 16:31:00+00:00",
+        price=4076.165,
+        stop_loss=4082.05,
+        take_profit=4073.526,
+        extra={
+            "pattern": "sell_blue_sweep",
+            "retest_level": "4078.611",
+            "sweep_high": "4081.25",
+            "blue_low": "4078.611",
+            "await_retest": "1",
+        },
+    )
+    fired = await engine.watch_retest(0.5, step=0.01)
+    text = capsys.readouterr().out
+    await db.close()
+    assert fired is True
+    assert engine._pending is None
+    assert "RETEST DETECTED" in text
+
 

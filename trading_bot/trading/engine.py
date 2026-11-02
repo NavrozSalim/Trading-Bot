@@ -12,11 +12,12 @@ from trading_bot.config import Settings
 from trading_bot.database.database import Database
 from trading_bot.exceptions import DuplicateSignalError, KillSwitchActive, RiskLimitError
 from trading_bot.market.chart_prices import zoom_action
-from trading_bot.market.kkc_vision import ColorMemory
+from trading_bot.market.kkc_vision import ColorMemory, minute_turn_wait_seconds
 from trading_bot.market.match import (
     align_paint,
     chart_match,
     chart_offset,
+    match_at,
     paint_by_time,
     server_to_chart_time,
 )
@@ -41,6 +42,29 @@ _FROZEN_SECONDS = 120
 _RELOAD_EVERY_SECONDS = 300
 _MATCH_MIN_VOTES = 8
 _MATCH_MIN_AGREE = 0.75
+_OWN_MINUTE_REACH = 2
+_OWN_MINUTE_AGREE = 0.65
+_OWN_MINUTE_MARGIN = 0.1
+_RETEST_POLL_SECONDS = 0.05
+_ENTRY_START_MINUTES = 3 * 60 + 50
+
+
+def chart_entry_open(now: datetime) -> bool:
+    """New orders start at 03:50 on the TradingView clock (UTC+5)."""
+    chart = server_to_chart_time(now)
+    return chart.hour * 60 + chart.minute >= _ENTRY_START_MINUTES
+
+
+async def _sleep_or_stop(duration: float, stop_event: asyncio.Event | None) -> None:
+    if duration <= 0:
+        return
+    if stop_event is None:
+        await asyncio.sleep(duration)
+        return
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=duration)
+    except TimeoutError:
+        return
 
 
 def invalid_setup_reason(stage_log: str) -> str:
@@ -89,20 +113,8 @@ class _ExpiredSetups:
         self.path.write_text(json.dumps(sorted(self._times)), encoding="utf-8")
 
 
-def _sizing_extreme(signal: Signal) -> float | None:
-    """Lowest low after the yellow, or highest high after the blue. Not the 0.80 stop."""
-    key = "sweep_low" if signal.signal is SignalType.BUY else "sweep_high"
-    raw = signal.extra.get(key)
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
 def _lot_entry(signal: Signal, price: float) -> float:
-    """Yellow high, or blue low. The lot uses that price to the sweep, not the fill."""
+    """Yellow high, or blue low. The lot uses that price to the stop, not the fill."""
     raw = signal.extra.get("retest_level")
     if raw:
         try:
@@ -140,6 +152,7 @@ class SignalEngine:
         self._last_closed_ts: str | None = None
         self._seen_pnl: dict[str, float] = {}
         self._pending: Signal | None = None
+        self._last_forming = None
         self._expired_setups = _ExpiredSetups(settings.logs_dir.parent / "data" / "expired_setups.json")
         self._ticket_anchor: dict[str, str] = {}
         self._stage_anchor = ""
@@ -151,8 +164,12 @@ class SignalEngine:
         self.color_reader = None
         self.refresh_chart = None
         self._last_refresh = 0.0
+        self._entry_wait_logged = ""
         self._color_memory = ColorMemory()
         self.journal = TradeExcel(settings.logs_dir.parent / "data" / "trades.xlsx")
+
+    def _utc_now(self) -> datetime:
+        return datetime.now(timezone.utc)
 
     def _shown_reason(self, signal: Signal) -> str:
         """Stage checklist for the terminal. Reset when a new yellow or blue starts."""
@@ -263,6 +280,37 @@ class SignalEngine:
             else _MATCH_MIN_VOTES
         )
         missing_side = len(chart_candles) >= 20 and (reds == 0 or greens == 0)
+        if not missing_side and minutes != 0 and abs(minutes) <= _OWN_MINUTE_REACH:
+            # A one-minute slide is usually a few candles that closed the other way.
+            # Move the clock only when the other minute matches a lot more candles.
+            own_agree, own_votes = match_at(chart_candles, history, 0)
+            own_rate = own_agree / own_votes if own_votes else 0.0
+            best_rate = agree / votes if votes else 0.0
+            close_enough = (
+                own_votes >= min_votes
+                and own_rate >= _OWN_MINUTE_AGREE
+                and own_rate >= best_rate - _OWN_MINUTE_MARGIN
+            )
+            barely_better = own_votes >= min_votes and (agree - own_agree) < 8
+            if close_enough or barely_better:
+                log.info(
+                    "chart_own_minute_kept",
+                    agree=own_agree,
+                    votes=own_votes,
+                    best_minutes=minutes,
+                )
+                return timedelta(0)
+        # The live chart is already on this minute. A few small candles can close
+        # the other way on TradingView. That must not hide a new yellow or blue.
+        same_minute = (
+            not missing_side
+            and minutes == 0
+            and votes >= min_votes
+            and votes > 0
+            and agree / votes >= _OWN_MINUTE_AGREE
+        )
+        if same_minute:
+            return timedelta(0)
         lined_up = not missing_side and votes >= min_votes and agree >= votes * _MATCH_MIN_AGREE
         if lined_up:
             return shift
@@ -337,6 +385,13 @@ class SignalEngine:
         shift_minutes = 0
         paint_waits = False
         if self.color_reader is not None and hasattr(self.color_reader, "read_market"):
+            if self._pending is not None and getattr(self.color_reader, "waits_past_minute_turn", False):
+                wait = minute_turn_wait_seconds()
+                if wait > 0:
+                    if await self.watch_retest(wait):
+                        return
+                elif await self.check_retest_tick():
+                    return
             market = await self.color_reader.read_market()
             if await self._chart_frozen(symbol):
                 return
@@ -407,6 +462,8 @@ class SignalEngine:
             forming = await self._forming_candle(symbol)
         if not candles:
             return
+        if forming is not None:
+            self._last_forming = forming
         last_ts = str(candles[-1].timestamp)
         self.health.update(current_price=str(price), current_symbol=symbol)
         if self._startup_bar is None:
@@ -492,6 +549,8 @@ class SignalEngine:
                 self._pending = signal
                 if await self._try_retest_entry(forming, symbol):
                     return
+                if not chart_entry_open(self._utc_now()):
+                    reason = f"{reason} | ENTRY STARTS AT 03:50 CHART TIME"
             self._say(
                 symbol=symbol,
                 timeframe=self.settings.timeframe,
@@ -511,6 +570,17 @@ class SignalEngine:
                 timeframe=self.settings.timeframe,
                 signal=signal.signal.value,
                 signal_reason=self._shown_reason(signal),
+                current_price=price,
+                trade_action="NO_TRADE",
+                **account,
+            )
+            return
+        if not chart_entry_open(self._utc_now()):
+            self._say(
+                symbol=symbol,
+                timeframe=self.settings.timeframe,
+                signal=signal.signal.value,
+                signal_reason="ENTRY STARTS AT 03:50 CHART TIME",
                 current_price=price,
                 trade_action="NO_TRADE",
                 **account,
@@ -559,6 +629,18 @@ class SignalEngine:
             log.warning("forming_candle_unavailable", error=str(exc))
             return None
 
+    def _sync_pending(self, signal: Signal) -> None:
+        """Drop an armed retest when this check is no longer that yellow or blue."""
+        if signal.extra.get("await_retest") == "1" and not self._expired_setups.contains(signal):
+            anchor = str(signal.extra.get("anchor_time", ""))
+            armed = ""
+            if self._pending is not None:
+                armed = str(self._pending.extra.get("anchor_time", ""))
+            if armed != anchor:
+                self._pending = signal
+            return
+        self._pending = None
+
     def _fresh_shows(self, fresh: list[str], signal) -> bool:
         color = "yellow" if str(signal.extra.get("pattern", "")).startswith("buy") else "blue"
         return color in fresh
@@ -575,6 +657,48 @@ class SignalEngine:
             log.info("pending_cleared_color_left_the_chart")
             self._pending = None
             self._fresh_misses = 0
+
+    async def check_retest_tick(self) -> bool:
+        """Check the live MT5 tick right now while a setup is waiting for a retest."""
+        if self._pending is None or self.terminal is None:
+            return False
+        if self.kill_switch.should_stop_loop():
+            return False
+        symbol = self.settings.mt5_symbol
+        forming = await self._forming_candle(symbol) or self._last_forming
+        if forming is None:
+            return False
+        self._last_forming = forming
+        return await self._try_retest_entry(forming, symbol)
+
+    async def watch_retest(
+        self,
+        duration: float,
+        *,
+        stop_event: asyncio.Event | None = None,
+        step: float = _RETEST_POLL_SECONDS,
+    ) -> bool:
+        """Wait between chart reads, checking MT5 ticks every 50ms when a retest is armed."""
+        if duration <= 0:
+            return await self.check_retest_tick()
+        if self._pending is None:
+            await _sleep_or_stop(duration, stop_event)
+            return False
+        deadline = time.monotonic() + duration
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            if self._pending is None:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    await _sleep_or_stop(remaining, stop_event)
+                return False
+            if await self.check_retest_tick():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await _sleep_or_stop(min(step, remaining), stop_event)
 
     async def _try_retest_entry(self, forming, symbol: str) -> bool:
         """Market order when the live ask is on the yellow high, or the bid is on the blue low."""
@@ -610,8 +734,17 @@ class SignalEngine:
         if quote is None or not price_on_retest(quote[0], quote[1], level, buy=buy):
             return False
         account = await self._account_view()
+        if int(account["open_trades"]) > 0:
+            return False
         if self._expired_setups.contains(pending):
             self._pending = None
+            return False
+        if not chart_entry_open(self._utc_now()):
+            chart = server_to_chart_time(self._utc_now())
+            stamp = chart.strftime("%H:%M")
+            if stamp != self._entry_wait_logged:
+                self._entry_wait_logged = stamp
+                log.info("entry_waits_for_chart_open", chart_time=stamp)
             return False
         side = SignalType.BUY if buy else SignalType.SELL
         entry = level
@@ -761,6 +894,7 @@ class SignalEngine:
         )
         self.health.update(latest_signal=signal.signal.value)
         await self._record_excel_invalid(symbol, signal)
+        self._sync_pending(signal)
         account = await self._account_view()
         if signal.extra.get("await_retest") == "1" and self._expired_setups.contains(signal):
             reason = "this yellow or blue already finished at the stop or target"
@@ -840,12 +974,12 @@ class SignalEngine:
             sized = calculate_lot(
                 balance=balance,
                 risk_pct=self.settings.risk_per_trade_pct,
+                risk_amount=self.settings.risk_per_trade_amount,
                 entry=lot_entry,
                 stop_loss=signal.stop_loss,
                 direction=signal.signal.value,
                 contract=contract,
                 max_position_size=self.settings.max_position_size,
-                sizing_extreme=_sizing_extreme(signal),
             )
             self.risk.assert_can_open(sized.quantity)
         except (RiskLimitError, Exception) as exc:
@@ -962,16 +1096,18 @@ class SignalEngine:
         if breakout is None:
             breakout = signal.price if signal.price is not None else price
         breakout = with_clock(breakout, extra.get("breakout_clock"))
-        extreme = _sizing_extreme(signal)
         points = ""
-        if extreme is not None and self.terminal is not None:
+        if signal.stop_loss and self.terminal is not None:
             try:
                 contract = await asyncio.to_thread(self.terminal.contract, signal.symbol)
                 if contract.tick_size > 0:
-                    points = round(abs(_lot_entry(signal, price) - extreme) / contract.tick_size, 1)
+                    points = round(abs(_lot_entry(signal, price) - float(signal.stop_loss)) / contract.tick_size, 1)
             except Exception as exc:  # noqa: BLE001
                 log.warning("trade_excel_points_unavailable", error=str(exc))
-        risk_money = round(balance * (self.settings.risk_per_trade_pct / 100.0), 2)
+        if self.settings.risk_per_trade_amount > 0:
+            risk_money = round(self.settings.risk_per_trade_amount, 2)
+        else:
+            risk_money = round(balance * (self.settings.risk_per_trade_pct / 100.0), 2)
         entry_type = "retest touch" if signal.reason == "retest_touch" else "candle close"
         retest_time = ""
         if signal.reason == "retest_touch":

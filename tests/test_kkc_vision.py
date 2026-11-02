@@ -209,6 +209,34 @@ def test_clipped_right_edge_sliver_keeps_the_blue_on_its_minute() -> None:
     assert colors == ["blue", "", "", ""]
 
 
+def test_the_purple_lightning_circle_does_not_merge_the_newest_candle() -> None:
+    hues: list[int | None] = [115, 0, 0, 0]
+    image = _regular_chart(hues, pitch=20, body=10, extra_right=30)
+    # Purple icon (hue 146) under the forming candle, wider than two candles.
+    _paint(image, 146, 68, 96, y0=38, y1=44)
+    colors = colors_from_bgr(image, _vision(), 3)
+    assert colors == ["blue", "", ""]
+
+
+def test_a_lone_price_tag_far_right_is_not_the_forming_candle() -> None:
+    hues: list[int | None] = [0, 25, 0, 0, 0, 0]
+    image = _regular_chart(hues, pitch=20, body=10, extra_right=260)
+    _paint(image, 0, 250, 272, y0=18, y1=26)
+    colors = colors_from_bgr(image, _vision(), 5)
+    assert colors == ["", "yellow", "", "", ""]
+
+
+def test_small_yellow_with_a_red_outline_is_still_yellow() -> None:
+    hues: list[int | None] = [0, None, 0, 0]
+    image = _regular_chart(hues, pitch=20, body=10)
+    center = 12 + 1 * 20 + 10
+    _paint(image, 0, center - 5, center + 5, y0=16, y1=24)
+    _paint(image, 17, center - 4, center + 4, y0=17, y1=23)
+    _paint(image, 30, center - 3, center + 3, y0=18, y1=22)
+    colors = colors_from_bgr(image, _vision(), 3)
+    assert colors == ["", "yellow", ""]
+
+
 def test_closed_plain_candle_cannot_turn_blue_after_later_slip() -> None:
     memory = ColorMemory()
     assert memory.apply(["15:07", "15:08"], ["", ""]) == ["", ""]

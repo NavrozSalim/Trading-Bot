@@ -47,10 +47,10 @@ def calculate_lot(
     direction: str,
     contract: SymbolContract,
     max_position_size: float,
-    sizing_extreme: float | None = None,
+    risk_amount: float = 0.0,
 ) -> SizeResult:
-    if balance <= 0 or risk_pct <= 0:
-        raise RiskLimitError("Balance or RISK_PER_TRADE_PCT is not usable.")
+    if balance <= 0 or (risk_amount <= 0 and risk_pct <= 0):
+        raise RiskLimitError("Balance or risk amount is not usable.")
     if entry <= 0 or stop_loss <= 0:
         raise RiskLimitError("Entry or stop loss is missing.")
 
@@ -60,9 +60,8 @@ def calculate_lot(
     if side == "SELL" and stop_loss <= entry:
         raise RiskLimitError("SELL stop loss must be above entry.")
 
-    # Lot uses the points from the setup extreme to the entry.
-    # The order stop is farther out by the 0.80 offset and is not part of this count.
-    measure = sizing_extreme if sizing_extreme is not None else stop_loss
+    # Lot uses the real stop, including the 0.80 beyond the sweep.
+    measure = stop_loss
     if side == "BUY" and measure >= entry:
         raise RiskLimitError("BUY point count must start below the entry.")
     if side == "SELL" and measure <= entry:
@@ -78,7 +77,7 @@ def calculate_lot(
     if money_per_lot <= 0:
         raise RiskLimitError("Loss per lot is not positive.")
 
-    risk_money = balance * (risk_pct / 100.0)
+    risk_money = risk_amount if risk_amount > 0 else balance * (risk_pct / 100.0)
     raw_lot = risk_money / money_per_lot
     capped = False
     if raw_lot > max_position_size > 0:
@@ -106,5 +105,5 @@ def calculate_lot(
         risk_money=risk_money,
         sl_distance=sl_distance,
         capped=capped,
-        reason="capped_to_max" if capped else "risk_pct",
+        reason="capped_to_max" if capped else ("risk_amount" if risk_amount > 0 else "risk_pct"),
     )

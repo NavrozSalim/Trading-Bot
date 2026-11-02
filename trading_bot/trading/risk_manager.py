@@ -41,9 +41,11 @@ class RiskManager:
             )
         if self.state.open_trades >= self.settings.max_open_trades:
             raise RiskLimitError("MAX_OPEN_TRADES reached.")
-        if self.state.trades_today >= self.settings.max_trades_per_day:
+        daily_cap = self.settings.max_trades_per_day
+        if daily_cap > 0 and self.state.trades_today >= daily_cap:
             raise RiskLimitError("MAX_TRADES_PER_DAY reached.")
-        if self.state.realized_pnl_today <= -abs(self.settings.max_daily_loss):
+        daily_loss_cap = self.settings.max_daily_loss
+        if daily_loss_cap > 0 and self.state.realized_pnl_today <= -abs(daily_loss_cap):
             raise RiskLimitError("MAX_DAILY_LOSS reached.")
         if self.state.consecutive_losses >= self.settings.max_consecutive_losses:
             raise RiskLimitError("MAX_CONSECUTIVE_LOSSES reached.")

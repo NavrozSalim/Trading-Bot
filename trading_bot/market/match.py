@@ -48,7 +48,13 @@ def paint_by_time(
     return [painted.get(_minute(_as_server(bar)), "") for bar in bar_times]
 
 
+# A body under 10 points flips between TradingView and MT5. It must not move the clock.
+_MIN_BODY = 0.10
+
+
 def _direction(candle) -> int:
+    if abs(candle.close - candle.open) < _MIN_BODY:
+        return 0
     if candle.close > candle.open:
         return 1
     if candle.close < candle.open:
@@ -64,6 +70,23 @@ def chart_offset(chart_candles: list, bars: list, reach: int = 5) -> timedelta:
     red and green pattern over MetaTrader's bars finds the true position.
     """
     return chart_match(chart_candles, bars, reach)[0]
+
+
+def match_at(chart_candles: list, bars: list, minutes: int) -> tuple[int, int]:
+    """How many reds and greens agree with MetaTrader at one shift, out of how many compared."""
+    by_minute = {_minute(_as_server(bar.timestamp)): _direction(bar) for bar in bars}
+    step = timedelta(minutes=minutes)
+    agree = votes = 0
+    for candle in chart_candles:
+        side = _direction(candle)
+        if side == 0:
+            continue
+        other = by_minute.get(_minute(chart_to_server_time(candle.timestamp)) + step, 0)
+        if other == 0:
+            continue
+        votes += 1
+        agree += 1 if other == side else 0
+    return agree, votes
 
 
 def chart_match(chart_candles: list, bars: list, reach: int) -> tuple[timedelta, int, int]:

@@ -171,10 +171,10 @@ def colors_from_bgr(image: np.ndarray, vision: ChartVision, count: int) -> list[
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     height, _width = hsv.shape[:2]
     top = int(height * 0.08)
-    bottom = int(height * 0.92)
-    if bottom <= top:
+    bottom = int(height * 0.88)
+    ink = _candle_column_ink(hsv)
+    if ink is None:
         return [""] * count
-    ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 2
     runs, forming_clipped = _candle_runs(ink)
     if len(runs) < 2:
         return [""] * count
@@ -201,10 +201,24 @@ def colors_from_bgr(image: np.ndarray, vision: ChartVision, count: int) -> list[
     return labels
 
 
+def _candle_column_ink(hsv: np.ndarray) -> np.ndarray | None:
+    """Columns with candle paint. The purple lightning circle at the bottom is not a candle."""
+    height = hsv.shape[0]
+    top = int(height * 0.08)
+    bottom = int(height * 0.88)
+    if bottom <= top:
+        return None
+    strip = hsv[top:bottom]
+    hue = strip[:, :, 0]
+    candle_hue = (hue <= 140) | (hue >= 165)
+    return np.count_nonzero((strip[:, :, 1] > 35) & candle_hue, axis=0) >= 2
+
+
 def _candle_runs(ink: np.ndarray) -> tuple[list[tuple[int, int]], bool]:
     """Candle bodies, and whether the newest candle was clipped off the right edge."""
     runs = _ink_runs(ink)
     runs = _cut_price_scale(runs)
+    runs = _drop_far_right_tags(runs)
     runs, forming_clipped = _drop_right_outlier(runs, len(ink))
     return _drop_wide_runs(runs), forming_clipped
 
@@ -260,6 +274,25 @@ def _cut_price_scale(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
     if cut is None:
         return runs
     return runs[: cut + 1]
+
+
+def _drop_far_right_tags(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Drop price tags on the price scale. The forming candle sits next to the last candle.
+
+    A red or green price tag stands alone many minutes to the right of the
+    newest candle. Taking it as the forming candle dates every candle late.
+    """
+    kept = list(runs)
+    for _ in range(3):
+        if len(kept) < 4:
+            return kept
+        centers = [(start + end) / 2.0 for start, end in kept]
+        gaps = [centers[index + 1] - centers[index] for index in range(len(centers) - 1)]
+        typical = float(np.median(gaps[:-1]))
+        if typical <= 0 or gaps[-1] <= typical * 3.0:
+            return kept
+        kept = kept[:-1]
+    return kept
 
 
 def _drop_right_outlier(
@@ -362,7 +395,12 @@ def _label_bar(
 
 
 def _body_pixels(hsv: np.ndarray, top: int, bottom: int, start: int, end: int) -> np.ndarray:
-    """Pixels in the candle body. A thin wick is not the color source."""
+    """Pixels inside the candle body.
+
+    A thin wick is not the color source. The outline and the soft edge of a
+    small yellow or blue body are red, green, or orange, so the outer ring of
+    the body is left out.
+    """
     patch = hsv[top:bottom, start:end]
     if patch.size == 0:
         return np.empty((0, 3), dtype=patch.dtype)
@@ -371,8 +409,15 @@ def _body_pixels(hsv: np.ndarray, top: int, bottom: int, start: int, end: int) -
     row_fill = saturated.sum(axis=1)
     body_rows = row_fill >= max(2, int(width * 0.45))
     if not np.any(body_rows):
-        chosen = patch[saturated]
-    else:
+        return patch[saturated].reshape(-1, 3)
+    rows = np.flatnonzero(body_rows)
+    if len(rows) >= 5:
+        rows = rows[1:-1]
+    margin = width // 5 if width >= 6 else 0
+    inner = patch[rows][:, margin : width - margin]
+    inner_saturated = saturated[rows][:, margin : width - margin]
+    chosen = inner[inner_saturated]
+    if len(chosen) < 4:
         chosen = patch[body_rows][saturated[body_rows]]
     return chosen.reshape(-1, 3)
 
@@ -422,8 +467,36 @@ class ColorMemory:
         return held
 
 
+_MINUTE_TURN_SECONDS = 3.0
+_MINUTE_END_SECONDS = 59.5
+
+
+def minute_turn_wait_seconds(now: datetime | None = None) -> float:
+    """Seconds to wait so a screenshot is not taken right on the minute turn."""
+    current = now or datetime.now()
+    second = current.second + current.microsecond / 1_000_000
+    if second < _MINUTE_TURN_SECONDS:
+        return _MINUTE_TURN_SECONDS - second
+    if second > _MINUTE_END_SECONDS:
+        return 60.0 - second + _MINUTE_TURN_SECONDS
+    return 0.0
+
+
+async def _wait_past_minute_turn() -> None:
+    """Capture away from the minute turn.
+
+    TradingView opens the new candle a moment after the clock turns. A picture
+    taken in that moment dates every candle one minute late.
+    """
+    wait = minute_turn_wait_seconds()
+    if wait > 0:
+        await asyncio.sleep(wait)
+
+
 class ScreenColorReader:
     """Capture the calibrated chart area and return yellow/blue labels."""
+
+    waits_past_minute_turn = True
 
     def __init__(self, path: Path = CONFIG_PATH) -> None:
         self.path = path
@@ -458,6 +531,7 @@ class ScreenColorReader:
         if not self.vision.ready:
             log.info("kkc_roi_not_calibrated")
             return []
+        await _wait_past_minute_turn()
         try:
             image = await asyncio.to_thread(_grab_roi, self.vision)
             colors = colors_from_bgr(image, self.vision, count)
@@ -481,18 +555,20 @@ class ScreenColorReader:
         if not self.vision.ready:
             log.info("kkc_roi_not_calibrated")
             return None
+        await _wait_past_minute_turn()
         try:
             image = await asyncio.to_thread(_grab_roi, self.vision)
         except Exception as exc:  # noqa: BLE001
             log.warning("kkc_capture_failed", error=str(exc))
             return None
+        taken = datetime.now().astimezone()
         self._note_picture(image)
         self.last_bars = await asyncio.to_thread(candle_run_count, image)
         market = await asyncio.to_thread(
             market_from_bgr,
             image,
             self.vision,
-            datetime.now().astimezone(),
+            taken,
             self._scale,
         )
         if market is None:
@@ -568,10 +644,9 @@ def _newest_candle_point(image: np.ndarray, vision: ChartVision) -> tuple[int, i
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     height = hsv.shape[0]
-    top, bottom = int(height * 0.08), int(height * 0.92)
-    if bottom <= top:
+    ink = _candle_column_ink(hsv)
+    if ink is None:
         return None
-    ink = np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 3
     runs, _forming_clipped = _candle_runs(ink)
     if len(runs) < 2:
         return None

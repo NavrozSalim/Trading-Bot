@@ -31,7 +31,7 @@ def test_gold_lot_from_two_percent_and_80_cent_stop() -> None:
 
 
 def test_lot_is_risk_divided_by_points_from_low_to_breakout() -> None:
-    """$500 at 2% is $10. 521 points from 4264.826 to the breakout is 10/521 = 0.02."""
+    """$10 risk over the stop, which is 521 points plus the 0.80."""
     low = 4264.826
     sized = calculate_lot(
         balance=500,
@@ -41,14 +41,13 @@ def test_lot_is_risk_divided_by_points_from_low_to_breakout() -> None:
         direction="BUY",
         contract=GOLD,
         max_position_size=1.0,
-        sizing_extreme=low,
     )
     assert sized.quantity == 0.02
     assert sized.risk_money == 10
 
 
 def test_sell_lot_is_risk_divided_by_points_from_high_to_breakdown() -> None:
-    """Same rule as buy: $10 risk / 521 points from the high after the blue to the breakdown."""
+    """Same rule as buy: $10 risk over the stop, including the 0.80."""
     high = 4286.754
     sized = calculate_lot(
         balance=500,
@@ -58,14 +57,13 @@ def test_sell_lot_is_risk_divided_by_points_from_high_to_breakdown() -> None:
         direction="SELL",
         contract=GOLD,
         max_position_size=1.0,
-        sizing_extreme=high,
     )
     assert sized.quantity == 0.02
     assert sized.risk_money == 10
 
 
 def test_six_hundred_points_on_a_500_account_rounds_to_two_cents() -> None:
-    """$10 risk / 600 points is 0.0167, and the nearest lot step is 0.02."""
+    """$10 risk over a 5.80 stop is 0.017, and the nearest lot step is 0.02."""
     sized = calculate_lot(
         balance=500,
         risk_pct=2.0,
@@ -74,10 +72,25 @@ def test_six_hundred_points_on_a_500_account_rounds_to_two_cents() -> None:
         direction="BUY",
         contract=GOLD,
         max_position_size=1.0,
-        sizing_extreme=4494,
     )
     assert sized.quantity == 0.02
     assert sized.risk_money == 10
+
+
+def test_fixed_15_dollars_sets_the_lot_from_the_full_stop() -> None:
+    """Yellow 4500, sweep 4496.7, stop 4495.9. $15 over 410 points rounds to 0.04."""
+    sized = calculate_lot(
+        balance=751,
+        risk_pct=2.0,
+        risk_amount=15,
+        entry=4500,
+        stop_loss=4495.9,
+        direction="BUY",
+        contract=GOLD,
+        max_position_size=1.0,
+    )
+    assert sized.risk_money == 15
+    assert sized.quantity == 0.04
 
 
 def test_cap_applies() -> None:

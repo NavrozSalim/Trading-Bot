@@ -20,6 +20,7 @@ import numpy as np
 from trading_bot.market.candle_reader import Candle
 from trading_bot.market.kkc_vision import (
     ChartVision,
+    _candle_column_ink,
     _candle_pitch,
     _candle_runs,
     _forming_center,
@@ -194,12 +195,7 @@ def _wicks_touch_edge(hsv: np.ndarray, runs: list[tuple[int, int]]) -> bool:
 
 
 def _column_ink(hsv: np.ndarray) -> np.ndarray | None:
-    height = hsv.shape[0]
-    top = int(height * 0.08)
-    bottom = int(height * 0.92)
-    if bottom <= top:
-        return None
-    return np.count_nonzero(hsv[top:bottom, :, 1] > 35, axis=0) >= 2
+    return _candle_column_ink(hsv)
 
 
 def _bar_ohlc(

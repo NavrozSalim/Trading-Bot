@@ -48,6 +48,18 @@ def test_risk_rejects_unknown_size(settings) -> None:  # type: ignore[no-untyped
         risk.assert_can_open(0)
 
 
+def test_zero_daily_trade_cap_does_not_block(settings) -> None:  # type: ignore[no-untyped-def]
+    settings.max_trades_per_day = 0
+    settings.max_daily_loss = 0
+    settings.max_open_trades = 1
+    settings.max_consecutive_losses = 100
+    risk = RiskManager(settings)
+    for _ in range(6):
+        risk.assert_can_open(0.01)
+        risk.record_open()
+        risk.record_close(-50)
+
+
 def test_risk_daily_and_count_limits(settings) -> None:  # type: ignore[no-untyped-def]
     settings.max_open_trades = 1
     settings.max_trades_per_day = 1
