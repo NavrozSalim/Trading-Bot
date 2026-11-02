@@ -520,6 +520,11 @@ class ScreenColorReader:
             return 0.0
         return time.monotonic() - self._picture_since
 
+    def forget_picture(self) -> None:
+        """Drop the stuck screenshot so a reload is not still called frozen."""
+        self._picture = b""
+        self._picture_since = 0.0
+
     def _note_picture(self, image: np.ndarray) -> None:
         picture = np.ascontiguousarray(image[::4, ::4]).tobytes()
         if picture != self._picture:

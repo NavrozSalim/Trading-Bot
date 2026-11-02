@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 
 from playwright.async_api import Page
 
@@ -63,6 +63,33 @@ def chart_url(settings: Settings) -> str:
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
 
 
+def _layout_id(path: str) -> str:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) >= 2 and parts[0] == "chart":
+        return parts[1]
+    return ""
+
+
+def _query_symbol(url: str) -> str:
+    return unquote(parse_qs(urlparse(url).query).get("symbol", [""])[0])
+
+
+def page_is_configured_chart(page_url: str, settings: Settings) -> bool:
+    """True only for the saved TradingView layout and symbol, not any XAUUSD chart."""
+    if "tradingview.com/chart" not in (page_url or "").lower():
+        return False
+    target = chart_url(settings)
+    target_parsed = urlparse(target)
+    page_parsed = urlparse(page_url)
+    target_layout = _layout_id(target_parsed.path)
+    if target_layout and _layout_id(page_parsed.path) != target_layout:
+        return False
+    target_symbol = _query_symbol(target)
+    if target_symbol and normalize_symbol(_query_symbol(page_url)) != normalize_symbol(target_symbol):
+        return False
+    return True
+
+
 def page_matches_symbol(*, title: str, url: str, symbol: str) -> bool:
     expected = normalize_symbol(symbol)
     haystack = normalize_symbol(f"{title} {url}")
@@ -87,9 +114,7 @@ class Navigator:
 
     async def open_trading_page(self, page: Page) -> None:
         url = chart_url(self.settings)
-        if page_matches_symbol(
-            title=await _safe_title(page), url=page.url, symbol=self.settings.symbol
-        ) and "tradingview.com/chart" in page.url:
+        if page_is_configured_chart(page.url, self.settings):
             log.info("already_on_trading_page", url=page.url)
             return
         log.info("open_trading_page", url=url, symbol=self.settings.symbol)
@@ -100,9 +125,7 @@ class Navigator:
         if "tradingview.com" not in page.url.lower():
             return
         await page.wait_for_timeout(1_500)
-        if page_matches_symbol(
-            title=await _safe_title(page), url=page.url, symbol=self.settings.symbol
-        ):
+        if page_is_configured_chart(page.url, self.settings):
             log.info("chart_symbol_ok", symbol=self.settings.symbol, title=await _safe_title(page))
             return
         await self._apply_tradingview_symbol(page)

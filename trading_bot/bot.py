@@ -148,6 +148,7 @@ class TradingBot:
                 page = await ctx.browser.start()
                 ctx.health.update(browser_status="connected")
                 await ctx.navigator.open_broker(page)
+                await self._reset_chart_view(page)
                 auth = await ctx.login.ensure_logged_in(page)
                 ctx.health.update(logged_in=auth is AuthStatus.LOGGED_IN)
             except Exception as exc:  # noqa: BLE001
@@ -182,6 +183,19 @@ class TradingBot:
     async def _reload_chart(self) -> None:
         page = await self.ctx.browser.bring_to_front()
         await page.reload(wait_until="domcontentloaded")
+        await self._reset_chart_view(page)
+
+    async def _reset_chart_view(self, page) -> None:  # type: ignore[no-untyped-def]
+        """Alt+R is TradingView's Reset chart view: normal zoom, newest candle on the right.
+        The saved layout otherwise opens zoomed far out and scrolled back."""
+        try:
+            await page.wait_for_selector("canvas", state="visible", timeout=30_000)
+            await asyncio.sleep(3)
+            await page.keyboard.press("Escape")
+            await page.keyboard.press("Alt+R")
+            log.info("chart_view_reset")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_view_reset_failed", error=str(exc))
 
     async def _loop(self) -> None:
         ctx = self.ctx

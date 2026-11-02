@@ -28,6 +28,11 @@ def test_the_frozen_timer_counts_only_while_the_picture_stays_the_same(monkeypat
     moved[0, 0] = 255
     reader._note_picture(moved)
     assert reader.unchanged_seconds == 0.0
+    reader._note_picture(still)
+    clock[0] = 400.0
+    assert reader.unchanged_seconds == 150.0
+    reader.forget_picture()
+    assert reader.unchanged_seconds == 0.0
 
 
 def _vision() -> ChartVision:
